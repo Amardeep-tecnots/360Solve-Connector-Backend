@@ -167,6 +167,8 @@ model Aggregator {
   category    String
   logoUrl     String?
   
+  // CLOUD or ON_PREMISE
+  type        AggregatorType @default(CLOUD)
   version     String   @default("1.0.0")
   
   // Capabilities: read, write, bulk, streaming, etc.
@@ -176,10 +178,11 @@ model Aggregator {
   authMethods  String[]
   
   // Configuration schema for dynamic form generation
-  configSchema Json?
+  configSchema Json?    // { authType, fields: [...], oauthConfig: {...} }
   
-  // Aggregator type (cloud or on-premise)
-  type        AggregatorType @default(CLOUD)
+  documentationUrl String?
+  
+  isPublic    Boolean  @default(true)
   
   // SDK reference (WASM or code)
   sdkRef      String?
@@ -202,33 +205,38 @@ model TenantAggregator {
   aggregatorId String
   aggregator   Aggregator @relation(fields: [aggregatorId], references: [id])
   
-  name        String   // Custom name given by tenant
-  status      AggregatorStatus @default(ACTIVE)
+  name        String   // Custom name given by tenant (e.g., "Salesforce Production")
+  description String?
   
-  // Configuration (encrypted)
-  config      Json
+  status      TenantAggregatorStatus @default(UNCONFIGURED)
   
-  // Credential storage reference (to Vault/secrets manager)
-  credentialRef String?
+  // Configuration (non-sensitive: host, port, instanceUrl, etc.)
+  config      Json     @default("{}")
   
-  // Test status tracking
-  lastTestAt     DateTime?
-  lastTestStatus String?
-  lastTestError  String?
+  // Encrypted credentials blob (field-level encryption)
+  credentials String?   // Encrypted JSON string
+  
+  // Test tracking
+  lastTestAt      DateTime?
+  lastTestStatus  String?   // "passed", "failed"
+  lastTestError   String?
   
   // Sync tracking
-  lastSyncAt     DateTime?
+  lastSyncAt      DateTime?
   
-  // Connection method used
-  connectionMethod String?
-  
-  // Linked mini connector (for on-premise aggregators)
+  // For on-premise aggregators
   miniConnectorId String?
+  
+  // Schema discovery relation
+  discoveredSchema DiscoveredSchema?
   
   installedAt DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
+  // Unique instance name per tenant + aggregator
+  @@unique([tenantId, aggregatorId, name])
   @@index([tenantId, status])
+  @@index([tenantId, aggregatorId]) // For filtering by type
   @@map("tenant_aggregators")
 }
 
@@ -258,6 +266,25 @@ model MiniConnector {
   
   @@index([tenantId, status])
   @@map("mini_connectors")
+}
+
+// Discovered schemas for tenant aggregators
+model DiscoveredSchema {
+  id                String   @id @default(uuid())
+  tenantAggregatorId String
+  tenantAggregator  TenantAggregator @relation(fields: [tenantAggregatorId], references: [id], onDelete: Cascade)
+  
+  // Cached schema data
+  tables            Json     // Array of { name, columns: [...] }
+  discoveredAt      DateTime @default(now())
+  refreshedAt       DateTime @default(now())
+  
+  // Metadata
+  tableCount        Int      @default(0)
+  
+  @@unique([tenantAggregatorId])
+  @@index([tenantAggregatorId])
+  @@map("discovered_schemas")
 }
 
 // Enums
@@ -305,17 +332,23 @@ enum AggregatorStatus {
   ACTIVE
   PAUSED
   ERROR
+}
+
+enum TenantAggregatorStatus {
+  ACTIVE
+  CONFIGURED
+  ERROR
   UNCONFIGURED
-  WAITING_FOR_CONNECTOR
+  PAUSED
+}
+
+enum AggregatorType {
+  CLOUD
+  ON_PREMISE
 }
 
 enum ConnectorStatus {
   ONLINE
   OFFLINE
   UNKNOWN
-}
-
-enum AggregatorType {
-  CLOUD
-  ON_PREMISE
 }
