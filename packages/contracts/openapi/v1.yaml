@@ -1,0 +1,991 @@
+openapi: 3.0.3
+info:
+  title: 360Solve Connector API
+  description: Multi-tenant ERP Integration Platform API
+  version: 1.0.0
+  contact:
+    name: 360Solve Support
+    email: support@360solve.com
+
+servers:
+  - url: http://localhost:3001/api/v1
+    description: Local development server
+
+security:
+  - bearerAuth: []
+  - tenantId: []
+
+paths:
+  # Auth endpoints
+  /auth/sign-up:
+    post:
+      tags:
+        - Auth
+      summary: Create new tenant and user
+      description: Register a new organization with admin user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignUpRequest'
+      responses:
+        201:
+          description: User and tenant created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        400:
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/sign-in:
+    post:
+      tags:
+        - Auth
+      summary: Authenticate user
+      description: Sign in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignInRequest'
+      responses:
+        200:
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        401:
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Auth
+      summary: Refresh access token
+      description: Get new access token using refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        200:
+          description: Tokens refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        401:
+          description: Invalid refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/sign-out:
+    post:
+      tags:
+        - Auth
+      summary: Sign out
+      description: Revoke current session tokens
+      responses:
+        204:
+          description: Signed out successfully
+        401:
+          description: Unauthorized
+
+  # Workflow endpoints
+  /workflows:
+    get:
+      tags:
+        - Workflows
+      summary: List workflows
+      description: Get paginated list of workflows for tenant
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, active, archived]
+      responses:
+        200:
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowListResponse'
+
+    post:
+      tags:
+        - Workflows
+      summary: Create workflow
+      description: Create a new workflow definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        201:
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+
+  /workflows/{id}:
+    get:
+      tags:
+        - Workflows
+      summary: Get workflow by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+        404:
+          description: Workflow not found
+
+    put:
+      tags:
+        - Workflows
+      summary: Update workflow
+      description: Update workflow (creates new version)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkflowRequest'
+      responses:
+        200:
+          description: Workflow updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowResponse'
+
+    delete:
+      tags:
+        - Workflows
+      summary: Delete workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        204:
+          description: Workflow deleted
+
+  /workflows/{id}/execute:
+    post:
+      tags:
+        - Workflows
+      summary: Execute workflow
+      description: Start a new workflow execution
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input:
+                  type: object
+      responses:
+        202:
+          description: Workflow execution started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResponse'
+
+  # Execution endpoints
+  /executions:
+    get:
+      tags:
+        - Executions
+      summary: List executions
+      parameters:
+        - name: workflowId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, running, completed, failed, cancelled]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        200:
+          description: List of executions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionListResponse'
+
+  /executions/{id}:
+    get:
+      tags:
+        - Executions
+      summary: Get execution status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Execution details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionDetailResponse'
+
+  /executions/{id}/cancel:
+    post:
+      tags:
+        - Executions
+      summary: Cancel execution
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Cancellation requested
+
+  # Aggregator endpoints
+  /aggregators:
+    get:
+      tags:
+        - Aggregators
+      summary: List available aggregators
+      description: Get marketplace list of available connectors
+      responses:
+        200:
+          description: List of aggregators
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregatorListResponse'
+
+  /aggregators/{id}:
+    get:
+      tags:
+        - Aggregators
+      summary: Get aggregator details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Aggregator details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregatorDetailResponse'
+
+  /aggregators/{id}/install:
+    post:
+      tags:
+        - Aggregators
+      summary: Install aggregator
+      description: Install an aggregator for the tenant
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallAggregatorRequest'
+      responses:
+        201:
+          description: Aggregator installed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantAggregatorResponse'
+
+  /tenant-aggregators:
+    get:
+      tags:
+        - Aggregators
+      summary: List installed aggregators
+      responses:
+        200:
+          description: List of installed aggregators
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantAggregatorListResponse'
+
+  # Connector endpoints (Mini Connector)
+  /connectors:
+    get:
+      tags:
+        - Connectors
+      summary: List Mini Connectors
+      responses:
+        200:
+          description: List of connectors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorListResponse'
+
+    post:
+      tags:
+        - Connectors
+      summary: Create new connector
+      description: Generate API key for new Mini Connector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConnectorRequest'
+      responses:
+        201:
+          description: Connector created with API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorWithKeyResponse'
+
+  /connectors/{id}:
+    delete:
+      tags:
+        - Connectors
+      summary: Revoke connector
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        204:
+          description: Connector revoked
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    tenantId:
+      type: apiKey
+      in: header
+      name: X-Tenant-ID
+
+  schemas:
+    # Auth schemas
+    SignUpRequest:
+      type: object
+      required:
+        - email
+        - password
+        - name
+        - companyName
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        name:
+          type: string
+        companyName:
+          type: string
+        tier:
+          type: string
+          enum: [free, standard, enterprise]
+          default: free
+
+    SignInRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        rememberMe:
+          type: boolean
+          default: false
+
+    RefreshRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+
+    AuthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            tokens:
+              $ref: '#/components/schemas/TokenResponse'
+
+    TokenResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        tenantId:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+
+    # Workflow schemas
+    CreateWorkflowRequest:
+      type: object
+      required:
+        - name
+        - definition
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        definition:
+          $ref: '#/components/schemas/WorkflowDefinition'
+
+    UpdateWorkflowRequest:
+      type: object
+      required:
+        - name
+        - definition
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        definition:
+          $ref: '#/components/schemas/WorkflowDefinition'
+
+    WorkflowDefinition:
+      type: object
+      required:
+        - nodes
+        - connections
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowNode'
+        connections:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowConnection'
+        schedule:
+          $ref: '#/components/schemas/ScheduleConfig'
+
+    WorkflowNode:
+      type: object
+      required:
+        - id
+        - type
+        - label
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [source, transform, destination]
+        label:
+          type: string
+        config:
+          type: object
+
+    WorkflowConnection:
+      type: object
+      required:
+        - from
+        - to
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+
+    ScheduleConfig:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [manual, interval, cron]
+        expression:
+          type: string
+        interval:
+          type: integer
+          description: Seconds between runs
+
+    WorkflowResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            description:
+              type: string
+            version:
+              type: integer
+            hash:
+              type: string
+            status:
+              type: string
+              enum: [draft, active, archived]
+            definition:
+              $ref: '#/components/schemas/WorkflowDefinition'
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+
+    WorkflowListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowListItem'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    WorkflowListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        lastRun:
+          type: string
+          format: date-time
+        nextRun:
+          type: string
+          format: date-time
+        successRate:
+          type: number
+        totalRuns:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    # Execution schemas
+    ExecutionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            executionId:
+              type: string
+            status:
+              type: string
+              enum: [pending, running, completed, failed, cancelled]
+
+    ExecutionListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionListItem'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    ExecutionListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        workflowId:
+          type: string
+        workflowName:
+          type: string
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+
+    ExecutionDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            workflowId:
+              type: string
+            workflowVersion:
+              type: integer
+            status:
+              type: string
+            currentStep:
+              type: string
+            startedAt:
+              type: string
+              format: date-time
+            completedAt:
+              type: string
+              format: date-time
+            results:
+              type: object
+            activities:
+              type: array
+              items:
+                $ref: '#/components/schemas/ActivityExecution'
+
+    ActivityExecution:
+      type: object
+      properties:
+        id:
+          type: string
+        activityId:
+          type: string
+        status:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        output:
+          type: object
+        error:
+          type: object
+
+    # Aggregator schemas
+    AggregatorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AggregatorListItem'
+
+    AggregatorListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        logoUrl:
+          type: string
+        version:
+          type: string
+        isInstalled:
+          type: boolean
+
+    AggregatorDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/AggregatorDetail'
+
+    AggregatorDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        authMethods:
+          type: array
+          items:
+            type: string
+        documentation:
+          type: string
+
+    InstallAggregatorRequest:
+      type: object
+      required:
+        - config
+      properties:
+        config:
+          type: object
+          properties:
+            method:
+              type: string
+              enum: [credentials, custom_api]
+            host:
+              type: string
+            port:
+              type: integer
+            username:
+              type: string
+            password:
+              type: string
+            database:
+              type: string
+            endpoint:
+              type: string
+            authType:
+              type: string
+            authToken:
+              type: string
+
+    TenantAggregatorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            aggregatorId:
+              type: string
+            name:
+              type: string
+            status:
+              type: string
+            config:
+              type: object
+            installedAt:
+              type: string
+              format: date-time
+
+    TenantAggregatorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantAggregatorResponse'
+
+    # Connector schemas
+    CreateConnectorRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        os:
+          type: string
+          enum: [windows, linux, macos]
+
+    ConnectorWithKeyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            apiKey:
+              type: string
+            downloadUrl:
+              type: string
+            setupInstructions:
+              type: string
+
+    ConnectorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectorListItem'
+
+    ConnectorListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [online, offline, unknown]
+        ipAddress:
+          type: string
+        version:
+          type: string
+        lastSeen:
+          type: string
+          format: date-time
+        activeWorkflows:
+          type: integer
+
+    # Common schemas
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          default: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object

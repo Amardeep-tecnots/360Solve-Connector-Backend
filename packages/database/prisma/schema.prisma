@@ -1,0 +1,321 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core tenant management
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  tier      TenantTier @default(FREE)
+  status    TenantStatus @default(ACTIVE)
+  
+  // Resource quotas
+  maxConcurrentWorkflows Int @default(5)
+  maxJobsPerHour        Int @default(100)
+  maxConcurrentJobs     Int @default(2)
+  maxStorageGB          Int @default(1)
+  
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  users     User[]
+  workflows WorkflowDefinition[]
+  aggregators TenantAggregator[]
+  connectors MiniConnector[]
+  executions WorkflowExecution[]
+  
+  @@index([tier, status])
+  @@map("tenants")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  email     String
+  password  String   // Hashed
+  name      String
+  role      UserRole @default(ADMIN)
+  
+  // Refresh tokens
+  refreshTokens RefreshToken[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// Workflow definitions (versioned)
+model WorkflowDefinition {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  // Versioning
+  version   Int      @default(1)
+  hash      String   // SHA-256 of definition
+  
+  name        String
+  description String?
+  definition  Json   // Full workflow definition (nodes, connections, schedule)
+  
+  status    WorkflowStatus @default(DRAFT)
+  
+  // Lifecycle
+  deprecatedAfter   DateTime?
+  forceCancelAfter  DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  executions WorkflowExecution[]
+  
+  @@unique([id, version])
+  @@unique([tenantId, id, version])
+  @@index([tenantId, status])
+  @@map("workflow_definitions")
+}
+
+// Workflow executions
+model WorkflowExecution {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  workflowId      String
+  workflowVersion Int
+  workflow        WorkflowDefinition @relation(fields: [workflowId, workflowVersion], references: [id, version])
+  workflowHash    String   // Snapshot of hash at execution time
+  
+  status      ExecutionStatus @default(PENDING)
+  currentStep String?
+  
+  // State reference (stored in S3/MinIO)
+  stateSnapshotRef String?
+  
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  
+  // Relations
+  activities  ActivityExecution[]
+  
+  @@index([tenantId, status])
+  @@index([tenantId, startedAt])
+  @@index([workflowId, workflowVersion])
+  @@map("workflow_executions")
+}
+
+// Activity executions (per attempt)
+model ActivityExecution {
+  id        String   @id @default(uuid())
+  tenantId  String
+  
+  executionId String
+  execution   WorkflowExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  
+  activityId  String
+  attempt     Int      @default(1)
+  
+  status      ActivityStatus @default(PENDING)
+  
+  // Output stored in S3, versioned per attempt
+  outputRef   String?
+  
+  errorMessage   String?
+  errorRetryable Boolean?
+  
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  
+  @@unique([executionId, activityId, attempt])
+  @@index([executionId, status])
+  @@index([tenantId, startedAt])
+  @@map("activity_executions")
+}
+
+// Aggregator definitions (marketplace)
+model Aggregator {
+  id          String   @id @default(uuid())
+  
+  name        String
+  description String?
+  category    String
+  logoUrl     String?
+  
+  version     String   @default("1.0.0")
+  
+  // Capabilities: read, write, bulk, streaming, etc.
+  capabilities String[]
+  
+  // Auth methods supported
+  authMethods  String[]
+  
+  // Configuration schema for dynamic form generation
+  configSchema Json?
+  
+  // Aggregator type (cloud or on-premise)
+  type        AggregatorType @default(CLOUD)
+  
+  // SDK reference (WASM or code)
+  sdkRef      String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  tenantInstallations TenantAggregator[]
+  
+  @@map("aggregators")
+}
+
+// Tenant's installed aggregators
+model TenantAggregator {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  aggregatorId String
+  aggregator   Aggregator @relation(fields: [aggregatorId], references: [id])
+  
+  name        String   // Custom name given by tenant
+  status      AggregatorStatus @default(ACTIVE)
+  
+  // Configuration (encrypted)
+  config      Json
+  
+  // Credential storage reference (to Vault/secrets manager)
+  credentialRef String?
+  
+  // Test status tracking
+  lastTestAt     DateTime?
+  lastTestStatus String?
+  lastTestError  String?
+  
+  // Sync tracking
+  lastSyncAt     DateTime?
+  
+  // Connection method used
+  connectionMethod String?
+  
+  // Linked mini connector (for on-premise aggregators)
+  miniConnectorId String?
+  
+  installedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([tenantId, status])
+  @@map("tenant_aggregators")
+}
+
+// Mini Connector agents
+model MiniConnector {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  name      String
+  
+  // API key (hashed, actual key shown only once on creation)
+  apiKeyHash String
+  
+  status    ConnectorStatus @default(OFFLINE)
+  
+  // System info (last reported)
+  ipAddress   String?
+  version     String?
+  os          String?
+  cpuUsage    Int?
+  memoryUsage Int?
+  
+  lastSeenAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([tenantId, status])
+  @@map("mini_connectors")
+}
+
+// Enums
+enum TenantTier {
+  FREE
+  STANDARD
+  ENTERPRISE
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum UserRole {
+  ADMIN
+  MEMBER
+}
+
+enum WorkflowStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ActivityStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AggregatorStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+  UNCONFIGURED
+  WAITING_FOR_CONNECTOR
+}
+
+enum ConnectorStatus {
+  ONLINE
+  OFFLINE
+  UNKNOWN
+}
+
+enum AggregatorType {
+  CLOUD
+  ON_PREMISE
+}
