@@ -111,11 +111,39 @@ export class MySQLConnection implements ConnectionHandler {
         });
       }
 
+      // Query foreign key relationships
+      const [fkResult] = await connection.execute(`
+        SELECT 
+          kcu.TABLE_NAME as from_table,
+          kcu.COLUMN_NAME as from_column,
+          kcu.REFERENCED_TABLE_NAME as to_table,
+          kcu.REFERENCED_COLUMN_NAME as to_column,
+          tc.CONSTRAINT_NAME as constraint_name
+        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+        JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc 
+          ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME 
+          AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+        WHERE kcu.TABLE_SCHEMA = ? 
+          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+          AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+        ORDER BY kcu.TABLE_NAME, kcu.COLUMN_NAME
+      `, [database]);
+
+      const fkRows = fkResult as any[];
+      const relationships = fkRows.map((row: any) => ({
+        fromTable: row.from_table,
+        fromColumn: row.from_column,
+        toTable: row.to_table,
+        toColumn: row.to_column,
+        constraintName: row.constraint_name,
+      }));
+
       return {
         tables: Array.from(tablesMap.entries()).map(([name, columns]) => ({
           name,
           columns,
         })),
+        relationships,
       };
     } finally {
       await connection.end();

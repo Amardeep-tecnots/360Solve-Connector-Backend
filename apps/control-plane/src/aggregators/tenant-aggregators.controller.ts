@@ -41,8 +41,18 @@ class InstallTenantAggregatorDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  credentialId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
-  credentials?: Record<string, string>;
+  credentials?: Record<string, any>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  connectorId?: string;
 
   @ApiPropertyOptional({ default: false })
   @IsOptional()
@@ -50,20 +60,25 @@ class InstallTenantAggregatorDto {
   testConnection?: boolean;
 }
 
-class SaveTenantAggregatorCredentialsDto {
-  @ApiPropertyOptional()
-  @IsOptional()
+class UpdateTenantAggregatorDto {
+  @ApiProperty()
   @IsString()
-  name?: string;
+  name!: string;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()
   config?: Record<string, any>;
 
-  @ApiProperty()
-  @IsObject()
-  credentials!: Record<string, string>;
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  credentialId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  connectorId?: string;
 }
 
 class TenantAggregatorResponseDto {
@@ -183,29 +198,32 @@ export class TenantAggregatorsController {
     }
 
     const result = await this.tenantAggregatorsService.install(
-      aggregatorId,
       tenantId,
+      aggregatorId,
       body.name,
       body.config,
+      body.credentialId,
       body.credentials,
+      body.connectorId,
       body.testConnection,
     );
     
     return { success: true, data: result };
   }
 
-  @Put(':id/credentials')
-  async saveCredentials(
+  @Put(':id')
+  async update(
     @Param('id') id: string,
     @TenantId() tenantId: string,
-    @Body() body: SaveTenantAggregatorCredentialsDto,
+    @Body() body: UpdateTenantAggregatorDto,
   ) {
-    const result = await this.tenantAggregatorsService.saveCredentials(
+    const result = await this.tenantAggregatorsService.update(
       id,
       tenantId,
-      body.name || '',
-      body.config || {},
-      body.credentials,
+      body.name,
+      body.config,
+      body.credentialId,
+      body.connectorId,
     );
     
     return { success: true, data: result };
@@ -220,7 +238,6 @@ export class TenantAggregatorsController {
     return this.tenantAggregatorsService.testConnection(
       id,
       tenantId,
-      body?.credentials,
     );
   }
 

@@ -1,10 +1,13 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, TenantTier, TenantStatus } from '@prisma/client';
 
 const prisma = new PrismaClient();
+
+const SYSTEM_TENANT_ID = 'system';
 
 const sampleAggregators = [
   {
     id: 'agg-salesforce',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'Salesforce',
     description: 'CRM and customer success platform',
     category: 'CRM',
@@ -35,6 +38,7 @@ const sampleAggregators = [
   },
   {
     id: 'agg-mysql',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'MySQL',
     description: 'Relational database management system',
     category: 'Database',
@@ -56,6 +60,7 @@ const sampleAggregators = [
   },
   {
     id: 'agg-postgres',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'PostgreSQL',
     description: 'Advanced open-source relational database',
     category: 'Database',
@@ -80,6 +85,7 @@ const sampleAggregators = [
   },
   {
     id: 'agg-hubspot',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'HubSpot',
     description: 'Marketing, sales, and service platform',
     category: 'CRM',
@@ -103,6 +109,7 @@ const sampleAggregators = [
   },
   {
     id: 'agg-snowflake',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'Snowflake',
     description: 'Cloud data warehouse platform',
     category: 'Data Warehouse',
@@ -125,6 +132,7 @@ const sampleAggregators = [
   },
   {
     id: 'agg-bigquery',
+    tenantId: SYSTEM_TENANT_ID,
     name: 'BigQuery',
     description: 'Connect to Google BigQuery',
     category: 'Data Warehouse',
@@ -144,11 +152,26 @@ const sampleAggregators = [
 ];
 
 async function main() {
+  console.log('Creating system tenant...');
+  
+  // Create system tenant for public aggregators
+  await prisma.tenant.upsert({
+    where: { id: SYSTEM_TENANT_ID },
+    update: {},
+    create: {
+      id: SYSTEM_TENANT_ID,
+      name: 'System',
+      tier: TenantTier.ENTERPRISE,
+      status: TenantStatus.ACTIVE,
+    }
+  });
+  console.log('System tenant created/updated');
+
   console.log('Start seeding aggregators...');
 
   for (const agg of sampleAggregators) {
     await prisma.aggregator.upsert({
-      where: { id: agg.id as string },
+      where: { id: agg.id },
       update: agg as any,
       create: agg as any
     });

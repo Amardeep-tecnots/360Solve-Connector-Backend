@@ -37,7 +37,7 @@ export class AggregatorsService {
         include: {
           _count: {
             select: {
-              tenantInstallations: {
+              instances: {
                 where: { tenantId },
               },
             },
@@ -59,7 +59,7 @@ export class AggregatorsService {
         authMethods: agg.authMethods,
         configSchema: agg.configSchema,
         logoUrl: agg.logoUrl,
-        installCount: agg._count.tenantInstallations,
+        installCount: agg._count?.instances ?? 0,
       })),
       meta: {
         page,

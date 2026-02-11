@@ -33,6 +33,13 @@ export interface SchemaDiscoveryResult {
       primaryKey?: boolean;
     }>;
   }>;
+  relationships: Array<{
+    fromTable: string;
+    fromColumn: string;
+    toTable: string;
+    toColumn: string;
+    constraintName: string;
+  }>;
 }
 
 export interface TablePreviewResult {

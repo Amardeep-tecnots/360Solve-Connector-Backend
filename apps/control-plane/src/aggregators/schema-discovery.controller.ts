@@ -65,6 +65,12 @@ export class SchemaDiscoveryController {
     return this.schemaDiscoveryService.getTable(id, tenantId, tableName);
   }
 
+  @Get(':id/schema/relationships')
+  @ApiResponse({ status: 200, type: SchemaDiscoveryResponseDto })
+  async getRelationships(@Param('id') id: string, @TenantId() tenantId: string) {
+    return this.schemaDiscoveryService.getRelationships(id, tenantId);
+  }
+
   @Post(':id/schema/preview')
   @ApiResponse({ status: 200, type: SchemaDiscoveryResponseDto })
   async previewTable(

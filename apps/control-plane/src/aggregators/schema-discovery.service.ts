@@ -11,10 +11,10 @@ export class SchemaDiscoveryService {
     private connectionFactory: ConnectionFactoryService,
   ) {}
 
-  async discover(tenantAggregatorId: string, tenantId: string) {
-    // Get tenant aggregator
-    const ta = await this.prisma.tenantAggregator.findFirst({
-      where: { id: tenantAggregatorId, tenantId },
+  async discover(aggregatorInstanceId: string, tenantId: string) {
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
       include: {
         aggregator: {
           select: {
@@ -23,70 +23,82 @@ export class SchemaDiscoveryService {
             type: true,
           },
         },
+        credential: true,
       },
     });
 
-    if (!ta) {
-      throw new NotFoundException(`Tenant aggregator with ID "${tenantAggregatorId}" not found`);
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
     }
 
-    // Check if aggregator has credentials
-    if (!ta.credentials) {
-      throw new BadRequestException('Aggregator must be configured with credentials before schema discovery');
+    // Check if instance has credentials
+    if (!instance.credentialId) {
+      throw new BadRequestException('Instance must be configured with credentials before schema discovery');
     }
 
     // Get connection handler
-    const handler = await this.connectionFactory.getTester(ta.aggregatorId) as ConnectionHandler;
+    const handler = await this.connectionFactory.getTester(instance.aggregatorId) as ConnectionHandler;
 
-    // Decrypt credentials
-    const credentials = this.encryptionService.decrypt(ta.credentials) as Record<string, string>;
+    // Build credentials from credential record and connectionParams
+    // TODO: Fetch actual password from Vault using credential.vaultPath
+    const connectionParams = (instance.connectionParams || {}) as Record<string, any>;
+    const credentials: Record<string, any> = {
+      host: instance.credential?.host,
+      port: instance.credential?.port,
+      database: instance.credential?.database,
+      username: instance.credential?.usernameHint,
+      // Connection string takes precedence if stored in connectionParams
+      connectionString: connectionParams.connectionString,
+      ...connectionParams,
+    };
 
     // Discover schema
-    const schemaResult = await handler.discoverSchema(ta.config as Record<string, any>, credentials);
+    const schemaResult = await handler.discoverSchema(connectionParams, credentials);
 
-    // Cache the discovered schema
-    const discoveredSchema = await this.prisma.discoveredSchema.upsert({
-      where: { tenantAggregatorId },
-      create: {
-        tenantAggregatorId,
-        tables: schemaResult.tables,
-        tableCount: schemaResult.tables.length,
-        discoveredAt: new Date(),
-        refreshedAt: new Date(),
-      },
-      update: {
-        tables: schemaResult.tables,
-        tableCount: schemaResult.tables.length,
-        refreshedAt: new Date(),
+    // Cache the discovered schema in the instance record
+    const discoveredSchemaData = {
+      tables: schemaResult.tables,
+      relationships: schemaResult.relationships,
+      tableCount: schemaResult.tables.length,
+      relationshipCount: schemaResult.relationships?.length || 0,
+      discoveredAt: new Date().toISOString(),
+      refreshedAt: new Date().toISOString(),
+    };
+
+    await this.prisma.aggregatorInstance.update({
+      where: { id: aggregatorInstanceId },
+      data: {
+        discoveredSchema: discoveredSchemaData,
+        schemaDiscoveredAt: new Date(),
       },
     });
 
     return {
       success: true,
       data: {
-        tenantAggregatorId,
-        tableCount: discoveredSchema.tableCount,
-        tables: discoveredSchema.tables,
-        discoveredAt: discoveredSchema.discoveredAt,
-        refreshedAt: discoveredSchema.refreshedAt,
+        aggregatorInstanceId,
+        tableCount: discoveredSchemaData.tableCount,
+        relationshipCount: discoveredSchemaData.relationshipCount,
+        tables: discoveredSchemaData.tables,
+        relationships: discoveredSchemaData.relationships,
+        discoveredAt: discoveredSchemaData.discoveredAt,
+        refreshedAt: discoveredSchemaData.refreshedAt,
       },
     };
   }
 
-  async getSchema(tenantAggregatorId: string, tenantId: string) {
-    // Get tenant aggregator
-    const ta = await this.prisma.tenantAggregator.findFirst({
-      where: { id: tenantAggregatorId, tenantId },
+  async getSchema(aggregatorInstanceId: string, tenantId: string) {
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
     });
 
-    if (!ta) {
-      throw new NotFoundException(`Tenant aggregator with ID "${tenantAggregatorId}" not found`);
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
     }
 
-    // Get discovered schema
-    const schema = await this.prisma.discoveredSchema.findUnique({
-      where: { tenantAggregatorId },
-    });
+    // Get discovered schema from instance
+    const schema = instance.discoveredSchema as any;
 
     if (!schema) {
       throw new NotFoundException('Schema not discovered yet. Call /discover endpoint first');
@@ -95,29 +107,29 @@ export class SchemaDiscoveryService {
     return {
       success: true,
       data: {
-        tenantAggregatorId,
+        aggregatorInstanceId,
         tableCount: schema.tableCount,
+        relationshipCount: schema.relationshipCount,
         tables: schema.tables,
+        relationships: schema.relationships,
         discoveredAt: schema.discoveredAt,
         refreshedAt: schema.refreshedAt,
       },
     };
   }
 
-  async getTables(tenantAggregatorId: string, tenantId: string) {
-    // Get tenant aggregator
-    const ta = await this.prisma.tenantAggregator.findFirst({
-      where: { id: tenantAggregatorId, tenantId },
+  async getTables(aggregatorInstanceId: string, tenantId: string) {
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
     });
 
-    if (!ta) {
-      throw new NotFoundException(`Tenant aggregator with ID "${tenantAggregatorId}" not found`);
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
     }
 
-    // Get discovered schema
-    const schema = await this.prisma.discoveredSchema.findUnique({
-      where: { tenantAggregatorId },
-    });
+    // Get discovered schema from instance
+    const schema = instance.discoveredSchema as any;
 
     if (!schema) {
       throw new NotFoundException('Schema not discovered yet. Call /discover endpoint first');
@@ -131,26 +143,24 @@ export class SchemaDiscoveryService {
     return {
       success: true,
       data: {
-        tenantAggregatorId,
+        aggregatorInstanceId,
         tables,
       },
     };
   }
 
-  async getTable(tenantAggregatorId: string, tenantId: string, tableName: string) {
-    // Get tenant aggregator
-    const ta = await this.prisma.tenantAggregator.findFirst({
-      where: { id: tenantAggregatorId, tenantId },
+  async getTable(aggregatorInstanceId: string, tenantId: string, tableName: string) {
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
     });
 
-    if (!ta) {
-      throw new NotFoundException(`Tenant aggregator with ID "${tenantAggregatorId}" not found`);
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
     }
 
-    // Get discovered schema
-    const schema = await this.prisma.discoveredSchema.findUnique({
-      where: { tenantAggregatorId },
-    });
+    // Get discovered schema from instance
+    const schema = instance.discoveredSchema as any;
 
     if (!schema) {
       throw new NotFoundException('Schema not discovered yet. Call /discover endpoint first');
@@ -167,22 +177,49 @@ export class SchemaDiscoveryService {
     return {
       success: true,
       data: {
-        tenantAggregatorId,
+        aggregatorInstanceId,
         tableName,
         columns: table.columns,
       },
     };
   }
 
+  async getRelationships(aggregatorInstanceId: string, tenantId: string) {
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
+    });
+
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
+    }
+
+    // Get discovered schema from instance
+    const schema = instance.discoveredSchema as any;
+
+    if (!schema) {
+      throw new NotFoundException('Schema not discovered yet. Call /discover endpoint first');
+    }
+
+    return {
+      success: true,
+      data: {
+        aggregatorInstanceId,
+        relationshipCount: schema.relationshipCount,
+        relationships: schema.relationships,
+      },
+    };
+  }
+
   async previewTable(
-    tenantAggregatorId: string,
+    aggregatorInstanceId: string,
     tenantId: string,
     tableName: string,
     limit: number = 10
   ) {
-    // Get tenant aggregator
-    const ta = await this.prisma.tenantAggregator.findFirst({
-      where: { id: tenantAggregatorId, tenantId },
+    // Get aggregator instance
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: aggregatorInstanceId, tenantId },
       include: {
         aggregator: {
           select: {
@@ -191,16 +228,25 @@ export class SchemaDiscoveryService {
             type: true,
           },
         },
+        credential: {
+          select: {
+            host: true,
+            port: true,
+            database: true,
+            usernameHint: true,
+            vaultPath: true,
+          },
+        },
       },
     });
 
-    if (!ta) {
-      throw new NotFoundException(`Tenant aggregator with ID "${tenantAggregatorId}" not found`);
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${aggregatorInstanceId}" not found`);
     }
 
-    // Check if aggregator has credentials
-    if (!ta.credentials) {
-      throw new BadRequestException('Aggregator must be configured with credentials');
+    // Check if instance has credentials configured
+    if (!instance.credentialId) {
+      throw new BadRequestException('Instance must be configured with credentials');
     }
 
     // Validate limit
@@ -209,14 +255,24 @@ export class SchemaDiscoveryService {
     }
 
     // Get connection handler
-    const handler = await this.connectionFactory.getTester(ta.aggregatorId) as ConnectionHandler;
+    const handler = await this.connectionFactory.getTester(instance.aggregatorId) as ConnectionHandler;
 
-    // Decrypt credentials
-    const credentials = this.encryptionService.decrypt(ta.credentials) as Record<string, string>;
+    // Build credentials from credential record and connectionParams
+    // TODO: Fetch actual password from Vault using credential.vaultPath
+    const connectionParams = (instance.connectionParams || {}) as Record<string, any>;
+    const credentials: Record<string, any> = {
+      host: instance.credential?.host,
+      port: instance.credential?.port,
+      database: instance.credential?.database,
+      username: instance.credential?.usernameHint,
+      // Connection string takes precedence if stored in connectionParams
+      connectionString: connectionParams.connectionString,
+      ...connectionParams,
+    };
 
     // Preview table
     const previewResult = await handler.previewTable(
-      ta.config as Record<string, any>,
+      connectionParams,
       credentials,
       tableName,
       limit

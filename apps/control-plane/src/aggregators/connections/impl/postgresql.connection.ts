@@ -133,6 +133,34 @@ export class PostgreSQLConnection implements ConnectionHandler {
         });
       }
 
+      // Query foreign key relationships
+      const fkResult = await client.query(`
+        SELECT 
+          tc.table_name as from_table,
+          kcu.column_name as from_column,
+          ccu.table_name as to_table,
+          ccu.column_name as to_column,
+          tc.constraint_name as constraint_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu 
+          ON tc.constraint_name = kcu.constraint_name 
+          AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+          AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY' 
+          AND tc.table_schema = 'public'
+        ORDER BY tc.table_name, kcu.column_name
+      `);
+
+      const relationships = fkResult.rows.map((row: any) => ({
+        fromTable: row.from_table,
+        fromColumn: row.from_column,
+        toTable: row.to_table,
+        toColumn: row.to_column,
+        constraintName: row.constraint_name,
+      }));
+
       await client.end();
 
       return {
@@ -140,6 +168,7 @@ export class PostgreSQLConnection implements ConnectionHandler {
           name,
           columns,
         })),
+        relationships,
       };
     } catch (error: any) {
       await client.end().catch(() => {});
