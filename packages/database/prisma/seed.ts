@@ -2,74 +2,183 @@ import { PrismaClient, TenantTier, TenantStatus } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+const SYSTEM_TENANT_ID = 'system';
+
+const sampleAggregators = [
+  {
+    id: 'agg-salesforce',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'Salesforce',
+    description: 'CRM and customer success platform',
+    category: 'CRM',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'bulk'],
+    authMethods: ['oauth', 'api_key'],
+    configSchema: {
+      authType: 'oauth',
+      fields: [
+        {
+          name: 'instanceUrl',
+          label: 'Instance URL',
+          type: 'url',
+          required: true,
+          placeholder: 'https://yourinstance.salesforce.com',
+          helpText: 'Your Salesforce instance URL'
+        }
+      ],
+      oauthConfig: {
+        authorizeUrl: 'https://login.salesforce.com/services/oauth2/authorize',
+        tokenUrl: 'https://login.salesforce.com/services/oauth2/token',
+        scope: 'api refresh_token'
+      }
+    },
+    documentationUrl: 'https://developer.salesforce.com/docs',
+    isPublic: true,
+  },
+  {
+    id: 'agg-mysql',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'MySQL',
+    description: 'Relational database management system',
+    category: 'Database',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'streaming'],
+    authMethods: ['basic'],
+    configSchema: {
+      authType: 'basic',
+      fields: [
+        { name: 'host', label: 'Host', type: 'text', required: true, placeholder: 'localhost' },
+        { name: 'port', label: 'Port', type: 'number', required: true, placeholder: '3306' },
+        { name: 'username', label: 'Username', type: 'text', required: true },
+        { name: 'password', label: 'Password', type: 'password', required: true },
+        { name: 'database', label: 'Database', type: 'text', required: true, helpText: 'Database name' }
+      ]
+    },
+    isPublic: true,
+  },
+  {
+    id: 'agg-postgres',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'PostgreSQL',
+    description: 'Advanced open-source relational database',
+    category: 'Database',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'streaming', 'cdc'],
+    authMethods: ['basic', 'connection_string'],
+    configSchema: {
+      authType: 'connection_string',
+      fields: [
+        {
+          name: 'connectionString',
+          label: 'Connection String',
+          type: 'password',
+          required: true,
+          placeholder: 'postgresql://user:pass@host:5432/db',
+          helpText: 'Full PostgreSQL connection string'
+        }
+      ]
+    },
+    isPublic: true,
+  },
+  {
+    id: 'agg-hubspot',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'HubSpot',
+    description: 'Marketing, sales, and service platform',
+    category: 'CRM',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'bulk'],
+    authMethods: ['api_key'],
+    configSchema: {
+      authType: 'api_key',
+      fields: [
+        {
+          name: 'apiKey',
+          label: 'Private App Token',
+          type: 'password',
+          required: true,
+          helpText: 'Create a private app in HubSpot settings'
+        }
+      ]
+    },
+    isPublic: true,
+  },
+  {
+    id: 'agg-snowflake',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'Snowflake',
+    description: 'Cloud data warehouse platform',
+    category: 'Data Warehouse',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'bulk'],
+    authMethods: ['basic'],
+    configSchema: {
+      authType: 'basic',
+      fields: [
+        { name: 'account', label: 'Account', type: 'text', required: true, helpText: 'Your Snowflake account identifier' },
+        { name: 'username', label: 'Username', type: 'text', required: true },
+        { name: 'password', label: 'Password', type: 'password', required: true },
+        { name: 'warehouse', label: 'Warehouse', type: 'text', required: true },
+        { name: 'database', label: 'Database', type: 'text', required: true },
+        { name: 'schema', label: 'Schema', type: 'text', required: false, placeholder: 'PUBLIC' }
+      ]
+    },
+    isPublic: true,
+  },
+  {
+    id: 'agg-bigquery',
+    tenantId: SYSTEM_TENANT_ID,
+    name: 'BigQuery',
+    description: 'Connect to Google BigQuery',
+    category: 'Data Warehouse',
+    type: 'CLOUD',
+    version: '1.0.0',
+    capabilities: ['read', 'write', 'bulk'],
+    authMethods: ['service_account'],
+    configSchema: {
+      authType: 'service_account',
+      fields: [
+        { name: 'projectId', label: 'Project ID', type: 'text', required: true, helpText: 'Your Google Cloud project ID' },
+        { name: 'keyFile', label: 'Service Account Key', type: 'textarea', required: true, helpText: 'Paste the contents of your service account JSON key file' }
+      ]
+    },
+    isPublic: true,
+  },
+];
+
 async function main() {
-  // Seed default aggregators
-  const aggregators = [
-    {
-      id: 'agg-postgres',
-      name: 'PostgreSQL',
-      description: 'Connect to PostgreSQL databases',
-      category: 'Database',
-      capabilities: ['read', 'write', 'bulk'],
-      authMethods: ['credentials'],
-      isPublic: true,
-    },
-    {
-      id: 'agg-mysql',
-      name: 'MySQL',
-      description: 'Connect to MySQL databases',
-      category: 'Database',
-      capabilities: ['read', 'write', 'bulk'],
-      authMethods: ['credentials'],
-      isPublic: true,
-    },
-    {
-      id: 'agg-salesforce',
-      name: 'Salesforce',
-      description: 'Connect to Salesforce CRM',
-      category: 'CRM',
-      capabilities: ['read', 'write', 'bulk'],
-      authMethods: ['oauth2', 'api_key'],
-      isPublic: true,
-    },
-    {
-      id: 'agg-hubspot',
-      name: 'HubSpot',
-      description: 'Connect to HubSpot CRM',
-      category: 'CRM',
-      capabilities: ['read', 'write'],
-      authMethods: ['api_key', 'oauth2'],
-      isPublic: true,
-    },
-    {
-      id: 'agg-snowflake',
-      name: 'Snowflake',
-      description: 'Connect to Snowflake data warehouse',
-      category: 'Data Warehouse',
-      capabilities: ['read', 'write', 'bulk'],
-      authMethods: ['credentials'],
-      isPublic: true,
-    },
-    {
-      id: 'agg-bigquery',
-      name: 'BigQuery',
-      description: 'Connect to Google BigQuery',
-      category: 'Data Warehouse',
-      capabilities: ['read', 'write', 'bulk'],
-      authMethods: ['service_account'],
-      isPublic: true,
-    },
-  ];
+  console.log('Creating system tenant...');
+  
+  // Create system tenant for public aggregators
+  await prisma.tenant.upsert({
+    where: { id: SYSTEM_TENANT_ID },
+    update: {},
+    create: {
+      id: SYSTEM_TENANT_ID,
+      name: 'System',
+      tier: TenantTier.ENTERPRISE,
+      status: TenantStatus.ACTIVE,
+    }
+  });
+  console.log('System tenant created/updated');
 
-  for (const aggregator of aggregators) {
+  console.log('Start seeding aggregators...');
+
+  for (const agg of sampleAggregators) {
     await prisma.aggregator.upsert({
-      where: { id: aggregator.id },
-      update: aggregator,
-      create: aggregator,
+      where: { id: agg.id },
+      update: agg as any,
+      create: agg as any
     });
+    console.log(`Upserted aggregator: ${agg.name}`);
   }
-
-  console.log('✅ Seeded aggregators');
+  
+  console.log(`✅ Seeded ${sampleAggregators.length} aggregators`);
 }
 
 main()

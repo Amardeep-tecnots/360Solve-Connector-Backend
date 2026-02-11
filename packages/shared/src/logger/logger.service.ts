@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { createLogger, format, transports, Logger, Logform } from 'winston';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -37,6 +38,7 @@ export interface StructuredLog {
   metadata?: Record<string, unknown>;
 }
 
+@Injectable()
 export class LoggerService {
   private logger: Logger;
   private context: LogContext = {};

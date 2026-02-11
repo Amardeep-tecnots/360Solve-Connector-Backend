@@ -7,7 +7,10 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Core tenant management
+// ============================================
+// CORE TENANT MANAGEMENT
+// ============================================
+
 model Tenant {
   id        String   @id @default(uuid())
   name      String
@@ -25,11 +28,14 @@ model Tenant {
   updatedAt DateTime @updatedAt
   
   // Relations
-  users     User[]
-  workflows WorkflowDefinition[]
-  aggregators TenantAggregator[]
-  connectors MiniConnector[]
-  executions WorkflowExecution[]
+  users               User[]
+  workflows           WorkflowDefinition[]
+  aggregators         Aggregator[]
+  aggregatorInstances AggregatorInstance[]
+  connectors          Connector[]
+  credentials         TenantCredential[]
+  executions          WorkflowExecution[]
+  controlFlags        SystemControlFlag[]
   
   @@index([tier, status])
   @@map("tenants")
@@ -69,7 +75,10 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
-// Workflow definitions (versioned)
+// ============================================
+// WORKFLOW SYSTEM
+// ============================================
+
 model WorkflowDefinition {
   id        String   @id @default(uuid())
   tenantId  String
@@ -89,6 +98,10 @@ model WorkflowDefinition {
   deprecatedAfter   DateTime?
   forceCancelAfter  DateTime?
   
+  // Requirements for execution
+  requiredSDKVersion   Int?
+  requiredCapabilities String[]
+  
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   
@@ -101,7 +114,6 @@ model WorkflowDefinition {
   @@map("workflow_definitions")
 }
 
-// Workflow executions
 model WorkflowExecution {
   id        String   @id @default(uuid())
   tenantId  String
@@ -123,6 +135,7 @@ model WorkflowExecution {
   
   // Relations
   activities  ActivityExecution[]
+  events      ExecutionEvent[]
   
   @@index([tenantId, status])
   @@index([tenantId, startedAt])
@@ -130,7 +143,6 @@ model WorkflowExecution {
   @@map("workflow_executions")
 }
 
-// Activity executions (per attempt)
 model ActivityExecution {
   id        String   @id @default(uuid())
   tenantId  String
@@ -138,10 +150,18 @@ model ActivityExecution {
   executionId String
   execution   WorkflowExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
   
-  activityId  String
+  activityId  String   // Reference to activity in workflow definition
+  activityType String // extract, transform, load, multi-extract, multi-load, sync, filter, join
   attempt     Int      @default(1)
   
   status      ActivityStatus @default(PENDING)
+  
+  // Aggregator instance references for tracking
+  sourceInstanceId      String?
+  sourceInstance        AggregatorInstance? @relation(name: "SourceInstance", fields: [sourceInstanceId], references: [id])
+  
+  destinationInstanceId String?
+  destinationInstance   AggregatorInstance? @relation(name: "DestinationInstance", fields: [destinationInstanceId], references: [id])
   
   // Output stored in S3, versioned per attempt
   outputRef   String?
@@ -149,118 +169,263 @@ model ActivityExecution {
   errorMessage   String?
   errorRetryable Boolean?
   
+  // Idempotency key used for this execution
+  idempotencyKey String?
+  
   startedAt   DateTime @default(now())
   completedAt DateTime?
   
   @@unique([executionId, activityId, attempt])
   @@index([executionId, status])
   @@index([tenantId, startedAt])
+  @@index([sourceInstanceId])
+  @@index([destinationInstanceId])
   @@map("activity_executions")
 }
 
-// Aggregator definitions (marketplace)
-model Aggregator {
+model ExecutionEvent {
   id          String   @id @default(uuid())
   
-  name        String
+  executionId String
+  execution   WorkflowExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  
+  timestamp   DateTime @default(now())
+  eventType   String   // ACTIVITY_STARTED, ACTIVITY_COMPLETED, ACTIVITY_FAILED, STATE_SAVED, etc.
+  payload     Json?
+  
+  // For tamper-proof audit trail
+  previousHash String?
+  signature    String?
+  
+  @@index([executionId, timestamp])
+  @@map("execution_events")
+}
+
+// ============================================
+// AGGREGATOR SYSTEM (Type + Instance Model)
+// ============================================
+
+// Aggregator = The SDK/type definition (MySQL, PostgreSQL, Salesforce)
+model Aggregator {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  name        String           // "MySQL Connector"
   description String?
   category    String
   logoUrl     String?
   
+  // Type classification
+  type        AggregatorType @default(CLOUD)
   version     String   @default("1.0.0")
   
-  // Capabilities: read, write, bulk, streaming, etc.
+  // Capabilities: read, write, bulk, streaming, multi-table, etc.
   capabilities String[]
   
   // Auth methods supported
   authMethods  String[]
   
   // Configuration schema for dynamic form generation
-  configSchema Json?
+  configSchema Json?    // { authType, fields: [...], oauthConfig: {...} }
   
-  // Aggregator type (cloud or on-premise)
-  type        AggregatorType @default(CLOUD)
+  documentationUrl String?
+  
+  isPublic    Boolean  @default(false)  // false = private to tenant
   
   // SDK reference (WASM or code)
   sdkRef      String?
+  sdkVersion  Int      @default(1)
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
   // Relations
-  tenantInstallations TenantAggregator[]
+  instances   AggregatorInstance[]
   
+  @@index([tenantId])
+  @@index([tenantId, category])
   @@map("aggregators")
 }
 
-// Tenant's installed aggregators
-model TenantAggregator {
+// AggregatorInstance = A configured instance with specific credentials
+model AggregatorInstance {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  // Parent aggregator (the type/SDK)
+  aggregatorId  String
+  aggregator    Aggregator @relation(fields: [aggregatorId], references: [id], onDelete: Cascade)
+  
+  // Instance configuration
+  name          String           // "Production MySQL"
+  description   String?
+  
+  // Credentials stored securely in Vault (reference only)
+  credentialId  String?
+  credential    TenantCredential? @relation(fields: [credentialId], references: [id])
+  
+  // Connector assignment: NULL = Cloud Connector, "conn-xxx" = Mini Connector
+  connectorId   String?
+  connector     Connector? @relation(fields: [connectorId], references: [id])
+  
+  // Connection parameters (non-sensitive)
+  connectionParams Json?         // { host: "db.example.com", port: 3306, database: "prod" }
+  
+  // Schema cache (discovered tables/columns)
+  discoveredSchema Json?          // { tables: [...], relationships: [...] }
+  schemaDiscoveredAt DateTime?
+  
+  // Status
+  status        InstanceStatus   @default(ACTIVE)
+  lastUsedAt    DateTime?
+  
+  // Sync tracking
+  lastSyncAt    DateTime?
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  sourceActivities      ActivityExecution[] @relation(name: "SourceInstance")
+  destinationActivities ActivityExecution[] @relation(name: "DestinationInstance")
+  
+  @@unique([tenantId, name])
+  @@index([tenantId, aggregatorId])
+  @@index([tenantId, connectorId])
+  @@index([tenantId, status])
+  @@map("aggregator_instances")
+}
+
+// ============================================
+// CONNECTOR SYSTEM (Cloud + Mini)
+// ============================================
+
+model Connector {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  type          ConnectorType @default(CLOUD)
+  name          String        // "Office Server Mini" or "Cloud Pool A"
+  
+  // For Mini Connector authentication
+  apiKeyHash    String?       // bcrypt hash of API key
+  apiKeyPrefix  String?       // First 8 chars for identification (e.g., "vmc_ab12")
+  
+  // Connection state
+  status        ConnectorStatus @default(OFFLINE)
+  lastHeartbeat DateTime?
+  
+  // System info (last reported, for Mini Connectors)
+  ipAddress     String?
+  hostname      String?
+  version       String?
+  os            String?
+  
+  // Resource reporting
+  cpuUsage      Int?          // 0-100
+  memoryUsage   Int?          // MB
+  maxConcurrentJobs Int?      @default(5)
+  
+  // Capabilities advertised by connector
+  supportedAggregators String[] // ["mysql", "postgresql", "mssql"]
+  networkAccess   NetworkAccessType @default(LOCAL)
+  
+  // Command queue for offline connectors
+  pendingCommands Json?         @default("[]") // Queue of commands to process when online
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  instances     AggregatorInstance[]
+  
+  @@index([tenantId, status])
+  @@index([apiKeyHash])
+  @@index([tenantId, type])
+  @@map("connectors")
+}
+
+// ============================================
+// CREDENTIAL MANAGEMENT (Vault Integration)
+// ============================================
+
+model TenantCredential {
   id          String   @id @default(uuid())
   tenantId    String
   tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   
-  aggregatorId String
-  aggregator   Aggregator @relation(fields: [aggregatorId], references: [id])
+  name        String   // "Production MySQL"
+  description String?
   
-  name        String   // Custom name given by tenant
-  status      AggregatorStatus @default(ACTIVE)
+  // Vault reference (actual secrets stored in HashiCorp Vault)
+  vaultPath   String   // e.g., "/secret/tenants/{tenantId}/mysql-prod"
+  vaultKeyId  String?  // Specific key version for rotation tracking
   
-  // Configuration (encrypted)
-  config      Json
+  // Credential type
+  credentialType CredentialType @default(DATABASE)
   
-  // Credential storage reference (to Vault/secrets manager)
-  credentialRef String?
+  // Non-sensitive metadata for UI display
+  host        String?  // e.g., "db.example.com"
+  port        Int?     // e.g., 3306
+  database    String?  // e.g., "production"
+  usernameHint String? // e.g., "db_user" (partial for identification)
   
-  // Test status tracking
-  lastTestAt     DateTime?
-  lastTestStatus String?
-  lastTestError  String?
+  // Rotation tracking
+  lastRotatedAt DateTime?
+  expiresAt     DateTime?
   
-  // Sync tracking
-  lastSyncAt     DateTime?
-  
-  // Connection method used
-  connectionMethod String?
-  
-  // Linked mini connector (for on-premise aggregators)
-  miniConnectorId String?
-  
-  installedAt DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
-  @@index([tenantId, status])
-  @@map("tenant_aggregators")
-}
-
-// Mini Connector agents
-model MiniConnector {
-  id        String   @id @default(uuid())
-  tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  
-  name      String
-  
-  // API key (hashed, actual key shown only once on creation)
-  apiKeyHash String
-  
-  status    ConnectorStatus @default(OFFLINE)
-  
-  // System info (last reported)
-  ipAddress   String?
-  version     String?
-  os          String?
-  cpuUsage    Int?
-  memoryUsage Int?
-  
-  lastSeenAt  DateTime?
+  // Audit
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
-  @@index([tenantId, status])
-  @@map("mini_connectors")
+  // Relations
+  instances   AggregatorInstance[]
+  
+  @@unique([tenantId, name])
+  @@index([tenantId, credentialType])
+  @@map("tenant_credentials")
 }
 
-// Enums
+// ============================================
+// SYSTEM CONTROL FLAGS (Kill Switches)
+// ============================================
+
+model SystemControlFlag {
+  id          String   @id @default(uuid())
+  
+  // Scope: global, tenant, workflow, sdk, connector
+  scope       ControlScope
+  scopeId     String?  // tenantId, workflowId, etc. (NULL for global)
+  
+  tenantId    String?  // If tenant-scoped
+  tenant      Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  flagType    ControlFlagType
+  enabled     Boolean  @default(true)
+  
+  // Metadata
+  reason      String?  // Why this flag was set
+  setBy       String   // User ID who set it
+  
+  // Auto-expiration
+  expiresAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([scope, scopeId, enabled])
+  @@index([tenantId, enabled])
+  @@index([expiresAt])
+  @@map("system_control_flags")
+}
+
+// ============================================
+// ENHANCED ENUMS
+// ============================================
+
 enum TenantTier {
   FREE
   STANDARD
@@ -276,11 +441,13 @@ enum TenantStatus {
 enum UserRole {
   ADMIN
   MEMBER
+  VIEWER
 }
 
 enum WorkflowStatus {
   DRAFT
   ACTIVE
+  DEPRECATED
   ARCHIVED
 }
 
@@ -288,6 +455,7 @@ enum ExecutionStatus {
   PENDING
   RUNNING
   PAUSED
+  CANCELLING
   COMPLETED
   FAILED
   CANCELLED
@@ -299,23 +467,62 @@ enum ActivityStatus {
   COMPLETED
   FAILED
   CANCELLED
-}
-
-enum AggregatorStatus {
-  ACTIVE
-  PAUSED
-  ERROR
-  UNCONFIGURED
-  WAITING_FOR_CONNECTOR
-}
-
-enum ConnectorStatus {
-  ONLINE
-  OFFLINE
-  UNKNOWN
+  TIMEOUT
 }
 
 enum AggregatorType {
   CLOUD
   ON_PREMISE
+  HYBRID
+}
+
+enum InstanceStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+  CONNECTING
+  SYNCING
+}
+
+enum ConnectorType {
+  CLOUD
+  MINI
+}
+
+enum ConnectorStatus {
+  ONLINE
+  OFFLINE
+  CONNECTING
+  ERROR
+  BUSY
+}
+
+enum NetworkAccessType {
+  LOCAL       // Localhost/local network only
+  VPN         // VPN-accessible
+  INTERNET    // Public internet
+}
+
+enum CredentialType {
+  DATABASE
+  API_KEY
+  OAUTH
+  BASIC_AUTH
+  SSH_KEY
+}
+
+enum ControlScope {
+  GLOBAL
+  TENANT
+  WORKFLOW
+  SDK
+  CONNECTOR
+}
+
+enum ControlFlagType {
+  PAUSE       // Pause new executions
+  BLOCK       // Block completely
+  RATE_LIMIT  // Reduce rate limits
+  READONLY    // Read-only mode
+  EMERGENCY   // Emergency stop
 }

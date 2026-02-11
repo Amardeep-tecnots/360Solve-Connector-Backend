@@ -379,8 +379,13 @@ paths:
   /tenant-aggregators:
     get:
       tags:
-        - Aggregators
+        - TenantAggregators
       summary: List installed aggregators
+      parameters:
+        - name: aggregatorId
+          in: query
+          schema:
+            type: string
       responses:
         200:
           description: List of installed aggregators
@@ -388,6 +393,151 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TenantAggregatorListResponse'
+
+  /tenant-aggregators/install:
+    post:
+      tags:
+        - TenantAggregators
+      summary: Install aggregator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                aggregatorId:
+                  type: string
+                marketplaceId:
+                  type: string
+                name:
+                  type: string
+              oneOf:
+                - required: [aggregatorId, name]
+                - required: [marketplaceId, name]
+      responses:
+        201:
+          description: Aggregator installed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantAggregatorInstallResponse'
+
+  /tenant-aggregators/{id}:
+    get:
+      tags:
+        - TenantAggregators
+      summary: Get installed aggregator details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Aggregator details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantAggregatorDetailResponse'
+        404:
+          description: Not found
+
+    delete:
+      tags:
+        - TenantAggregators
+      summary: Delete/uninstall aggregator
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+        409:
+          description: Has workflow dependencies
+
+  /tenant-aggregators/{id}/credentials:
+    put:
+      tags:
+        - TenantAggregators
+      summary: Save credentials
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - credentials
+              properties:
+                name:
+                  type: string
+                config:
+                  type: object
+                credentials:
+                  type: object
+      responses:
+        200:
+          description: Credentials saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantAggregatorResponse'
+
+  /tenant-aggregators/{id}/test:
+    post:
+      tags:
+        - TenantAggregators
+      summary: Test connection
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credentials:
+                  type: object
+      responses:
+        200:
+          description: Test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  metadata:
+                    type: object
+                  errorCode:
+                    type: string
 
   # Connector endpoints (Mini Connector)
   /connectors:
@@ -829,6 +979,9 @@ components:
           type: string
         category:
           type: string
+        type:
+          type: string
+          enum: [CLOUD, ON_PREMISE]
         capabilities:
           type: array
           items:
@@ -837,7 +990,9 @@ components:
           type: array
           items:
             type: string
-        documentation:
+        configSchema:
+          type: object
+        documentationUrl:
           type: string
 
     InstallAggregatorRequest:
@@ -868,6 +1023,82 @@ components:
             authToken:
               type: string
 
+    TenantAggregatorInstallResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            aggregatorId:
+              type: string
+            name:
+              type: string
+            status:
+              type: string
+            type:
+              type: string
+            installedAt:
+              type: string
+              format: date-time
+
+    TenantAggregatorDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            aggregatorId:
+              type: string
+            name:
+              type: string
+            aggregatorName:
+              type: string
+            aggregatorDescription:
+              type: string
+              nullable: true
+            description:
+              type: string
+            category:
+              type: string
+            type:
+              type: string
+            logoUrl:
+              type: string
+            configSchema:
+              type: object
+            status:
+              type: string
+            config:
+              type: object
+            hasCredentials:
+              type: boolean
+            lastTestAt:
+              type: string
+              format: date-time
+            lastTestStatus:
+              type: string
+            lastTestError:
+              type: string
+            lastSyncAt:
+              type: string
+              format: date-time
+            miniConnectorId:
+              type: string
+            installedAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+
     TenantAggregatorResponse:
       type: object
       properties:
@@ -884,11 +1115,8 @@ components:
               type: string
             status:
               type: string
-            config:
-              type: object
-            installedAt:
-              type: string
-              format: date-time
+            hasCredentials:
+              type: boolean
 
     TenantAggregatorListResponse:
       type: object
@@ -898,7 +1126,7 @@ components:
         data:
           type: array
           items:
-            $ref: '#/components/schemas/TenantAggregatorResponse'
+            $ref: '#/components/schemas/TenantAggregatorDetailResponse'
 
     # Connector schemas
     CreateConnectorRequest:
