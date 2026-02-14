@@ -53,26 +53,46 @@ export class ExecutionStateService {
       where: { id: executionId, tenantId },
     });
 
-    // For now, reconstruct state from activity executions
+    if (!execution) return null;
+
     const activities = await this.prisma.activityExecution.findMany({
-      where: { executionId },
+      where: { executionId, tenantId },
+      orderBy: [{ activityId: 'asc' }, { attempt: 'desc' }],
     });
 
-    const completedSteps = activities
-      .filter(a => a.status === 'COMPLETED')
-      .map(a => a.activityId);
-    
-    const failedSteps = activities
-      .filter(a => a.status === 'FAILED')
-      .map(a => a.activityId);
+    const latestByStep = new Map<string, (typeof activities)[number]>();
+    for (const activity of activities) {
+      if (!latestByStep.has(activity.activityId)) {
+        latestByStep.set(activity.activityId, activity);
+      }
+    }
+
+    const completedSteps: string[] = [];
+    const failedSteps: string[] = [];
+    const stepOutputs: Record<string, any> = {};
+    let lastActivityAt = execution.startedAt;
+
+    for (const [stepId, activity] of latestByStep.entries()) {
+      if (activity.status === 'COMPLETED') completedSteps.push(stepId);
+      if (activity.status === 'FAILED') failedSteps.push(stepId);
+      if (activity.outputRef) {
+        try {
+          stepOutputs[stepId] = JSON.parse(activity.outputRef);
+        } catch {
+          stepOutputs[stepId] = activity.outputRef;
+        }
+      }
+      const activityTimestamp = activity.completedAt ?? activity.startedAt;
+      if (activityTimestamp > lastActivityAt) lastActivityAt = activityTimestamp;
+    }
 
     return {
-      currentStepId: execution?.currentStep || null,
+      currentStepId: execution.currentStep || null,
       completedSteps,
       failedSteps,
-      stepOutputs: {},
-      startedAt: execution?.startedAt || new Date(),
-      lastActivityAt: new Date(),
+      stepOutputs,
+      startedAt: execution.startedAt,
+      lastActivityAt,
     };
   }
 
@@ -81,11 +101,19 @@ export class ExecutionStateService {
     tenantId: string,
     state: ExecutionState
   ) {
+    const current = await this.prisma.workflowExecution.findFirst({
+      where: { id: executionId, tenantId },
+      select: { status: true },
+    });
+    if (!current) return;
+
+    const shouldUpdateStatus = current.status === ExecutionStatus.PENDING || current.status === ExecutionStatus.RUNNING;
+
     await this.prisma.workflowExecution.update({
       where: { id: executionId },
       data: {
         currentStep: state.currentStepId,
-        status: this.determineStatus(state),
+        status: shouldUpdateStatus ? this.determineStatus(state) : undefined,
       },
     });
   }
@@ -103,14 +131,16 @@ export class ExecutionStateService {
 
   async recordActivityExecution(
     executionId: string,
-    activityId: string,
+    tenantId: string,
+    stepId: string,
+    activityType: string,
     attempt: number,
     status: ActivityStatusType,
     output?: any,
     error?: { message: string; retryable: boolean }
   ) {
     const existing = await this.prisma.activityExecution.findFirst({
-      where: { executionId, activityId, attempt },
+      where: { executionId, tenantId, activityId: stepId, attempt },
     });
 
     if (existing) {
@@ -118,7 +148,7 @@ export class ExecutionStateService {
         where: { id: existing.id },
         data: {
           status,
-          outputRef: output ? JSON.stringify(output) : undefined,
+          outputRef: output !== undefined ? JSON.stringify(output) : undefined,
           errorMessage: error?.message,
           errorRetryable: error?.retryable,
           completedAt: status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED' ? new Date() : undefined,
@@ -129,12 +159,12 @@ export class ExecutionStateService {
     return this.prisma.activityExecution.create({
       data: {
         executionId,
-        activityId,
-        tenantId: '', // Will be set from context
-        activityType: 'extract',
+        activityId: stepId,
+        tenantId,
+        activityType,
         attempt,
         status,
-        outputRef: output ? JSON.stringify(output) : undefined,
+        outputRef: output !== undefined ? JSON.stringify(output) : undefined,
         errorMessage: error?.message,
         errorRetryable: error?.retryable,
       },
@@ -143,6 +173,7 @@ export class ExecutionStateService {
 
   private determineStatus(state: ExecutionState): ExecutionStatusType {
     if (state.failedSteps.length > 0) return ExecutionStatus.FAILED;
+    if (state.currentStepId) return ExecutionStatus.RUNNING;
     if (state.completedSteps.length > 0) return ExecutionStatus.RUNNING;
     return ExecutionStatus.PENDING;
   }

@@ -39,7 +39,8 @@ export interface ExecutionEvent {
     | 'EXECUTION_PAUSED'
     | 'EXECUTION_RESUMED'
     | 'EXECUTION_CANCELLED'
-    | 'EXECUTION_COMPLETED';
+    | 'EXECUTION_COMPLETED'
+    | 'EXECUTION_FAILED';
   payload: Record<string, any>;
 }
 

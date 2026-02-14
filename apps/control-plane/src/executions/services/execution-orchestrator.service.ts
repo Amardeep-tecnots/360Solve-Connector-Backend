@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma.service';
 import { ExecutionStateService } from './execution-state.service';
-import { WorkflowDefinition, WorkflowStep, Activity } from '../../workflows/entities/workflow-definition.types';
-import { ExecutionState, ExecutionEvent } from '../entities/execution.types';
+import { ActivityDispatcherService } from './activity-dispatcher.service';
+import { WorkflowDefinition, WorkflowStep } from '../../workflows/entities/workflow-definition.types';
+import { ExecutionState } from '../entities/execution.types';
 
 @Injectable()
 export class ExecutionOrchestratorService {
@@ -11,6 +12,7 @@ export class ExecutionOrchestratorService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stateService: ExecutionStateService,
+    private readonly dispatcher: ActivityDispatcherService,
   ) {}
 
   async startExecution(
@@ -57,6 +59,27 @@ export class ExecutionOrchestratorService {
     workflowDefinition: WorkflowDefinition,
     state: ExecutionState
   ) {
+    const execution = await this.prisma.workflowExecution.findFirst({
+      where: { id: executionId, tenantId },
+      select: { status: true },
+    });
+    if (!execution) throw new Error('Execution not found');
+    if (execution.status === 'PAUSED') return;
+    if (execution.status === 'CANCELLED' || execution.status === 'COMPLETED' || execution.status === 'FAILED') return;
+    if (execution.status === 'CANCELLING') {
+      await this.prisma.workflowExecution.update({
+        where: { id: executionId },
+        data: { status: 'CANCELLED', completedAt: new Date() },
+      });
+      await this.stateService.logEvent({
+        executionId,
+        timestamp: new Date(),
+        eventType: 'EXECUTION_CANCELLED',
+        payload: {},
+      });
+      return;
+    }
+
     const currentStep = workflowDefinition.steps.find(
       s => s.id === state.currentStepId
     );
@@ -82,9 +105,28 @@ export class ExecutionOrchestratorService {
       payload: { stepId: currentStep.id, activityId: activity.id, type: activity.type },
     });
 
-    // TODO: Dispatch to activity executor (Phase 4)
-    // For now, simulate activity completion
-    this.logger.log(`Would execute activity: ${activity.name} (${activity.type})`);
+    await this.stateService.recordActivityExecution(
+      executionId,
+      tenantId,
+      currentStep.id,
+      activity.type,
+      1,
+      'RUNNING',
+    );
+
+    try {
+      const output = await this.dispatcher.dispatch({
+        executionId,
+        tenantId,
+        step: currentStep,
+        activity,
+        workflowDefinition,
+      });
+      await this.onActivityCompleted(executionId, tenantId, currentStep.id, output, workflowDefinition);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      await this.onActivityFailed(executionId, tenantId, currentStep.id, err, false, workflowDefinition);
+    }
   }
 
   async onActivityCompleted(
@@ -97,15 +139,27 @@ export class ExecutionOrchestratorService {
     const state = await this.stateService.getExecutionState(executionId, tenantId);
     if (!state) throw new Error('Execution state not found');
 
+    const activityId = workflowDefinition.steps.find(s => s.id === stepId)?.activityId;
+    const activityType = workflowDefinition.activities.find(a => a.id === activityId)?.type ?? 'unknown';
+    await this.stateService.recordActivityExecution(
+      executionId,
+      tenantId,
+      stepId,
+      activityType,
+      1,
+      'COMPLETED',
+      output,
+    );
+
     // Record completion
-    state.completedSteps.push(stepId);
+    if (!state.completedSteps.includes(stepId)) state.completedSteps.push(stepId);
     state.stepOutputs[stepId] = output;
 
     await this.stateService.logEvent({
       executionId,
       timestamp: new Date(),
       eventType: 'STEP_COMPLETED',
-      payload: { stepId, activityId: workflowDefinition.steps.find(s => s.id === stepId)?.activityId },
+      payload: { stepId, activityId },
     });
 
     // Find next steps (depend on this step)
@@ -136,7 +190,20 @@ export class ExecutionOrchestratorService {
     const state = await this.stateService.getExecutionState(executionId, tenantId);
     if (!state) throw new Error('Execution state not found');
 
-    state.failedSteps.push(stepId);
+    const activityId = workflowDefinition.steps.find(s => s.id === stepId)?.activityId;
+    const activityType = workflowDefinition.activities.find(a => a.id === activityId)?.type ?? 'unknown';
+    await this.stateService.recordActivityExecution(
+      executionId,
+      tenantId,
+      stepId,
+      activityType,
+      1,
+      'FAILED',
+      undefined,
+      { message: error.message, retryable },
+    );
+
+    if (!state.failedSteps.includes(stepId)) state.failedSteps.push(stepId);
 
     await this.stateService.logEvent({
       executionId,
@@ -173,6 +240,7 @@ export class ExecutionOrchestratorService {
       where: { id: executionId },
       data: {
         status: 'COMPLETED',
+        currentStep: null,
         completedAt: new Date(),
       },
     });
@@ -197,8 +265,16 @@ export class ExecutionOrchestratorService {
       where: { id: executionId },
       data: {
         status: 'FAILED',
+        currentStep: null,
         completedAt: new Date(),
       },
+    });
+
+    await this.stateService.logEvent({
+      executionId,
+      timestamp: new Date(),
+      eventType: 'EXECUTION_FAILED',
+      payload: { error: errorMessage, failedSteps: state.failedSteps },
     });
 
     this.logger.error(`Execution ${executionId} failed: ${errorMessage}`);
