@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { BaseActivityHandler } from '../handlers/base-activity.handler';
 import { ConnectorClientService } from '../handlers/connector-client.service';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
+import { ExecutionStateService } from '../../executions/services/execution-state.service';
+import { PrismaService } from '../../prisma.service';
 
 interface LoadConfig {
   aggregatorInstanceId: string;
@@ -17,7 +19,8 @@ interface LoadConfig {
 export class LoadHandlerService extends BaseActivityHandler {
   constructor(
     private readonly connectorClient: ConnectorClientService,
-    stateService: any,
+    private readonly prisma: PrismaService,
+    stateService: ExecutionStateService,
   ) {
     super(stateService);
   }
@@ -37,7 +40,20 @@ export class LoadHandlerService extends BaseActivityHandler {
       await this.logActivityStart(context.executionId, context.activityId, config);
 
       // Get the first input
-      const inputData = Object.values(inputs)[0];
+      let inputData = Object.values(inputs)[0];
+
+      // Handle the case where input is wrapped in { data: [...] } or { error: ..., status: ... }
+      if (inputData && typeof inputData === 'object' && !Array.isArray(inputData)) {
+        // If the response has a 'data' property, use that
+        if ('data' in inputData) {
+          inputData = inputData.data;
+        }
+        // If the response has an 'error' property, the source failed
+        if ('error' in inputData) {
+          throw new Error(`Source activity failed: ${inputData.error}`);
+        }
+      }
+
       if (!Array.isArray(inputData)) {
         throw new Error('Load input must be an array');
       }
@@ -113,14 +129,43 @@ export class LoadHandlerService extends BaseActivityHandler {
   }
 
   private async getInstance(instanceId: string, tenantId: string) {
-    // TODO: Implement instance retrieval from database
-    // For now, return a mock instance
-    return {
-      id: instanceId,
-      aggregator: {
-        name: 'Mock Aggregator',
+    // Fetch the actual aggregator instance from the database
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: instanceId, tenantId },
+      include: {
+        aggregator: {
+          select: {
+            id: true,
+            name: true,
+            type: true,
+            category: true,
+          },
+        },
+        credential: {
+          select: {
+            id: true,
+            host: true,
+            port: true,
+            database: true,
+            usernameHint: true,
+          },
+        },
+        connector: {
+          select: {
+            id: true,
+            name: true,
+            type: true,
+          },
+        },
       },
-    };
+    });
+
+    if (!instance) {
+      throw new NotFoundException(`Aggregator instance with ID "${instanceId}" not found for tenant "${tenantId}"`);
+    }
+
+    // Return the full instance with credentials info
+    return instance;
   }
 
   private applyColumnMappings(

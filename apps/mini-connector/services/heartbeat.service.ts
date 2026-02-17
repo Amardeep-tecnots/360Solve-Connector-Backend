@@ -1,12 +1,18 @@
 import * as os from 'os';
 import axios from 'axios';
 import { WebSocketService } from './websocket-client.service';
+import { CommandOrchestratorService } from './command-orchestrator.service';
 
 export class HeartbeatService {
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly HEARTBEAT_INTERVAL = 30000; // 30 seconds
+  private commandOrchestratorService: CommandOrchestratorService | null = null;
 
   constructor(private readonly webSocketService: WebSocketService) {}
+
+  setCommandOrchestrator(service: CommandOrchestratorService) {
+    this.commandOrchestratorService = service;
+  }
 
   start() {
     this.stop();
@@ -39,6 +45,7 @@ export class HeartbeatService {
     const payload = {
       timestamp: new Date().toISOString(),
       status: this.getStatus(),
+      activeCommands: this.commandOrchestratorService?.getActiveCommandCount() || 0,
       cpuUsage: this.getCpuUsage(),
       memoryUsage: this.getMemoryUsagePercent(), // percentage 0-100
       maxConcurrentJobs: 5, // TODO: source from config

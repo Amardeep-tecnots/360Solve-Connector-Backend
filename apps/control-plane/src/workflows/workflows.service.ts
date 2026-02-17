@@ -36,10 +36,12 @@ export class WorkflowsService {
   }
 
   async create(tenantId: string, dto: CreateWorkflowDto) {
+    const definition = this.normalizeDefinition(dto.definition as any);
+
     // Validate definition
     const validation = await this.validationService.validate(
       tenantId,
-      dto.definition as WorkflowDefinition,
+      definition,
     );
 
     if (!validation.valid) {
@@ -50,14 +52,14 @@ export class WorkflowsService {
     }
 
     // Compute hash for immutability tracking
-    const hash = this.computeHash(dto.definition);
+    const hash = this.computeHash(definition);
 
     return this.prisma.workflowDefinition.create({
       data: {
         tenantId,
         name: dto.name,
         description: dto.description,
-        definition: dto.definition as any,
+        definition: definition as any,
         hash,
         status: 'DRAFT',
       },
@@ -69,10 +71,12 @@ export class WorkflowsService {
 
     // If definition is being updated, create new version
     if (dto.definition) {
+      const definition = this.normalizeDefinition(dto.definition as any);
+
       // Validate new definition
       const validation = await this.validationService.validate(
         tenantId,
-        dto.definition as WorkflowDefinition,
+        definition,
       );
 
       if (!validation.valid) {
@@ -82,7 +86,7 @@ export class WorkflowsService {
         });
       }
 
-      const newHash = this.computeHash(dto.definition);
+      const newHash = this.computeHash(definition);
 
       // Check if definition actually changed
       if (newHash !== existing.hash) {
@@ -92,7 +96,7 @@ export class WorkflowsService {
             tenantId,
             name: dto.name ?? existing.name,
             description: dto.description ?? existing.description,
-            definition: dto.definition as any,
+            definition: definition as any,
             hash: newHash,
             version: existing.version + 1,
             status: 'DRAFT',
@@ -102,12 +106,19 @@ export class WorkflowsService {
     }
 
     // Simple metadata update (no version bump)
+    const data: any = {};
+    if (dto.name !== undefined) {
+      data.name = dto.name;
+    }
+    if (dto.description !== undefined) {
+      data.description = dto.description;
+    }
+    if (dto.isActive !== undefined) {
+      data.status = dto.isActive ? 'ACTIVE' : 'INACTIVE';
+    }
     return this.prisma.workflowDefinition.update({
       where: { id },
-      data: {
-        name: dto.name,
-        description: dto.description,
-      },
+      data,
     });
   }
 
@@ -134,7 +145,87 @@ export class WorkflowsService {
   }
 
   async validate(tenantId: string, definition: WorkflowDefinition | any) {
-    return this.validationService.validate(tenantId, definition as WorkflowDefinition);
+    const normalized = this.normalizeDefinition(definition as any);
+    return this.validationService.validate(tenantId, normalized);
+  }
+
+  private normalizeDefinition(definition: WorkflowDefinition | any): WorkflowDefinition {
+    const activities = Array.isArray(definition?.activities) ? definition.activities : [];
+    const steps = Array.isArray(definition?.steps) ? definition.steps : [];
+
+    if (activities.length === 0) {
+      return {
+        ...definition,
+        activities: [],
+        steps: Array.isArray(definition?.steps) ? definition.steps : [],
+      } as WorkflowDefinition;
+    }
+
+    const activityIds = new Set<string>(activities.map((a: { id: string }) => a.id));
+    const existingStepIds = new Set<string>(steps.map((s: { id: string }) => s.id));
+    const existingStepByActivityId = new Map<string, string>();
+
+    for (const s of steps) {
+      if (s?.activityId) existingStepByActivityId.set(s.activityId, s.id);
+    }
+
+    const ensureUniqueStepId = (base: string): string => {
+      if (!existingStepIds.has(base)) {
+        existingStepIds.add(base);
+        return base;
+      }
+      let i = 1;
+      while (existingStepIds.has(`${base}-${i}`)) i += 1;
+      const id = `${base}-${i}`;
+      existingStepIds.add(id);
+      return id;
+    };
+
+    if (steps.length === 0) {
+      return {
+        ...definition,
+        steps: activities.map((a: { id: string }) => ({
+          id: `step-${a.id}`,
+          activityId: a.id,
+          dependsOn: [] as string[],
+        })),
+      } as WorkflowDefinition;
+    }
+
+    const nextSteps: Array<{ id: string; activityId: string; dependsOn: string[] }> = steps.map(
+      (s: any) => ({
+        id: s.id,
+        activityId: s.activityId,
+        dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn : [],
+      }),
+    );
+
+    for (const a of activities) {
+      if (!existingStepByActivityId.has(a.id)) {
+        const stepId = ensureUniqueStepId(`step-${a.id}`);
+        existingStepByActivityId.set(a.id, stepId);
+        nextSteps.push({
+          id: stepId,
+          activityId: a.id,
+          dependsOn: [],
+        });
+      }
+    }
+
+    const stepIds = new Set<string>(nextSteps.map((s) => s.id));
+    const normalizedSteps = nextSteps.map((s) => ({
+      ...s,
+      dependsOn: (s.dependsOn ?? []).map((dep: string) => {
+        if (stepIds.has(dep)) return dep;
+        if (activityIds.has(dep)) return existingStepByActivityId.get(dep) ?? dep;
+        return dep;
+      }),
+    }));
+
+    return {
+      ...definition,
+      steps: normalizedSteps,
+    } as WorkflowDefinition;
   }
 
   private computeHash(definition: WorkflowDefinition | any): string {

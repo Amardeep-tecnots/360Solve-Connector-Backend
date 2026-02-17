@@ -1,7 +1,7 @@
 import 'dotenv/config';
 console.log('[MAIN] File loading...');
 
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron';
 console.log('[MAIN] electron imported');
 
 import * as fs from 'fs';
@@ -31,6 +31,15 @@ console.log('[MAIN] ApiKeyAuthService imported');
 import { SettingsService, AggregatorConfig } from './services/settings.service';
 console.log('[MAIN] SettingsService imported');
 
+import { OfflineQueueService } from './services/offline-queue.service';
+console.log('[MAIN] OfflineQueueService imported');
+
+import { CommandOrchestratorService } from './services/command-orchestrator.service';
+console.log('[MAIN] CommandOrchestratorService imported');
+
+import { AuditLogService } from './services/audit-log.service';
+console.log('[MAIN] AuditLogService imported');
+
 let mainWindow: BrowserWindow | null = null;
 let webSocketService: WebSocketService | null = null;
 let credentialVaultService: CredentialVaultService | null = null;
@@ -38,24 +47,67 @@ let queryExecutorService: QueryExecutorService | null = null;
 let heartbeatService: HeartbeatService | null = null;
 let apiKeyAuthService: ApiKeyAuthService | null = null;
 let settingsService: SettingsService | null = null;
+let offlineQueueService: OfflineQueueService | null = null;
+let commandOrchestratorService: CommandOrchestratorService | null = null;
+let auditLogService: AuditLogService | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
 
 // Initialize services
 async function initializeServices() {
   try {
     console.log('[MAIN] Initializing services...');
+    auditLogService = new AuditLogService();
+    await auditLogService.log({ action: 'app_start', status: 'success', details: { version: app.getVersion() } });
+
     credentialVaultService = new CredentialVaultService();
     queryExecutorService = new QueryExecutorService(credentialVaultService);
     apiKeyAuthService = new ApiKeyAuthService();
     webSocketService = new WebSocketService(apiKeyAuthService);
     heartbeatService = new HeartbeatService(webSocketService);
     settingsService = new SettingsService();
+    offlineQueueService = new OfflineQueueService();
+    commandOrchestratorService = new CommandOrchestratorService(
+      webSocketService,
+      queryExecutorService,
+      offlineQueueService,
+      settingsService,
+      credentialVaultService
+    );
+    heartbeatService.setCommandOrchestrator(commandOrchestratorService);
 
     // Start/stop heartbeats based on connection lifecycle
     webSocketService.on('authenticated', () => {
+      console.log('[MAIN] WebSocket authenticated');
       heartbeatService?.start();
+      mainWindow?.webContents.send('websocket:connected');
     });
     webSocketService.on('disconnected', () => {
+      console.log('[MAIN] WebSocket disconnected');
       heartbeatService?.stop();
+      mainWindow?.webContents.send('websocket:disconnected');
+    });
+    webSocketService.on('error', (err) => {
+      console.error('[MAIN] WebSocket error:', err);
+      mainWindow?.webContents.send('websocket:error', err.message);
+    });
+
+    webSocketService.on('heartbeat_sent', () => {
+      mainWindow?.webContents.send('heartbeat:sent', new Date());
+    });
+
+    // Forward command events to renderer
+    commandOrchestratorService.on('command:start', (data) => {
+      console.log('[MAIN] Command start:', data);
+      mainWindow?.webContents.send('command:start', data);
+    });
+    commandOrchestratorService.on('command:success', (data) => {
+      console.log('[MAIN] Command success:', data);
+      mainWindow?.webContents.send('command:success', data);
+    });
+    commandOrchestratorService.on('command:error', (data) => {
+      console.error('[MAIN] Command error:', data);
+      mainWindow?.webContents.send('command:error', data);
     });
 
     // Register IPC handlers
@@ -76,6 +128,27 @@ async function initializeServices() {
     console.error('[MAIN] Failed to initialize services:', err);
     throw err;
   }
+}
+
+function createTray() {
+  const icon = nativeImage.createEmpty(); // Placeholder until we have assets
+  tray = new Tray(icon);
+  
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Open Dashboard', click: () => mainWindow?.show() },
+    { type: 'separator' },
+    { label: 'Exit', click: () => {
+      isQuitting = true;
+      app.quit();
+    }}
+  ]);
+  
+  tray.setToolTip('Mini Connector');
+  tray.setContextMenu(contextMenu);
+  
+  tray.on('click', () => {
+    mainWindow?.isVisible() ? mainWindow.hide() : mainWindow?.show();
+  });
 }
 
 function createWindow() {
@@ -126,6 +199,15 @@ function createWindow() {
 
   mainWindow.webContents.on('preload-error', (event, preloadPath, error) => {
     console.error('[MAIN] Preload error:', preloadPath, error);
+  });
+
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+      return false;
+    }
+    return true;
   });
 
   mainWindow.on('closed', () => {
@@ -190,18 +272,23 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('status:get-system-info', async () => {
+    const memoryUsage = process.memoryUsage();
     return {
       platform: os.platform(),
       arch: os.arch(),
       hostname: os.hostname(),
       cpus: os.cpus().length,
       totalMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024),
+      freeMemory: Math.round(os.freemem() / 1024 / 1024 / 1024),
+      uptime: process.uptime(),
+      processMemory: Math.round(memoryUsage.rss / 1024 / 1024),
+      loadAverage: os.loadavg(),
       version: app.getVersion(),
     };
   });
 
   ipcMain.handle('setup:complete', async (event, data: { apiKey: string; dbConfig: any; schema: any }) => {
-    if (!settingsService || !credentialVaultService) throw new Error('Services not initialized');
+    if (!settingsService || !credentialVaultService || !webSocketService) throw new Error('Services not initialized');
     
     // Save API key
     settingsService.save({ apiKey: data.apiKey });
@@ -233,6 +320,16 @@ function registerIpcHandlers() {
     
     settingsService.addAggregator(aggregator);
     console.log('[MAIN] Setup complete - saved aggregator #1:', aggregator.name);
+
+    // Send schema to cloud
+    if (data.schema) {
+      console.log('[MAIN] Sending initial schema to cloud...');
+      try {
+        webSocketService.sendSchema(data.schema);
+      } catch (e) {
+        console.warn('[MAIN] Failed to send schema:', e);
+      }
+    }
     
     return { success: true, aggregator };
   });
@@ -319,7 +416,7 @@ function registerIpcHandlers() {
     }
     
     return queryExecutorService.testConnection({
-      type: aggregator.type as 'mysql' | 'postgresql',
+      type: aggregator.type as 'mysql' | 'postgresql' | 'mssql',
       host: aggregator.host,
       port: aggregator.port,
       database: aggregator.database,
@@ -343,14 +440,175 @@ function registerIpcHandlers() {
       return { success: false, error: 'Credentials not found' };
     }
     
-    return queryExecutorService.discoverSchema({
-      type: aggregator.type as 'mysql' | 'postgresql',
-      host: aggregator.host,
-      port: aggregator.port,
-      database: aggregator.database,
-      username: credentials.username!,
-      password: (credentials as any).password!,
-    });
+    try {
+        const schema = await queryExecutorService.discoverSchema({
+          type: aggregator.type as 'mysql' | 'postgresql' | 'mssql',
+          host: aggregator.host,
+          port: aggregator.port,
+          database: aggregator.database,
+          username: credentials.username!,
+          password: (credentials as any).password!,
+        });
+        
+        auditLogService?.log({
+            action: 'schema_discovery',
+            status: 'success',
+            resourceType: 'aggregator',
+            resourceId: id,
+            details: { tableCount: schema.tables.length }
+        });
+        return schema;
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        auditLogService?.log({
+            action: 'schema_discovery',
+            status: 'failure',
+            resourceType: 'aggregator',
+            resourceId: id,
+            error: message
+        });
+        throw err;
+    }
+  });
+
+  ipcMain.handle('aggregators:sync-schema', async (event, id: string, schema: any) => {
+    if (!webSocketService) throw new Error('WebSocket service not initialized');
+    try {
+        // Enriched schema with aggregator ID if needed, or just send as is
+        webSocketService.sendSchema({
+            aggregatorId: id,
+            ...schema
+        });
+        auditLogService?.log({
+            action: 'schema_sync',
+            status: 'success',
+            resourceType: 'aggregator',
+            resourceId: id
+        });
+        return { success: true };
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error('Failed to sync schema:', e);
+        auditLogService?.log({
+            action: 'schema_sync',
+            status: 'failure',
+            resourceType: 'aggregator',
+            resourceId: id,
+            error: message
+        });
+        return { success: false, error: message };
+    }
+  });
+
+  ipcMain.handle('aggregators:preview-table', async (event, id: string, tableName: string) => {
+    if (!settingsService || !credentialVaultService || !queryExecutorService) {
+      throw new Error('Services not initialized');
+    }
+    
+    const aggregator = settingsService.getAggregatorById(id);
+    if (!aggregator) {
+      throw new Error('Aggregator not found');
+    }
+    
+    const credentials = await credentialVaultService.retrieveCredentials(aggregator.credentialId);
+    if (!credentials) {
+      throw new Error('Credentials not found');
+    }
+
+    try {
+        const result = await queryExecutorService.previewTable({
+            type: aggregator.type as 'mysql' | 'postgresql' | 'mssql',
+            host: aggregator.host,
+            port: aggregator.port,
+            database: aggregator.database,
+            username: credentials.username!,
+            password: (credentials as any).password!,
+        }, tableName);
+
+        auditLogService?.log({
+            action: 'preview_table',
+            status: 'success',
+            resourceType: 'table',
+            resourceId: tableName,
+            details: { rowCount: result.rowCount }
+        });
+        return result;
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        auditLogService?.log({
+            action: 'preview_table',
+            status: 'failure',
+            resourceType: 'table',
+            resourceId: tableName,
+            error: message
+        });
+        throw e;
+    }
+  });
+
+  ipcMain.handle('aggregators:transfer-table', async (event, id: string, tableName: string) => {
+    if (!settingsService || !credentialVaultService || !queryExecutorService || !webSocketService) {
+      throw new Error('Services not initialized');
+    }
+    
+    const aggregator = settingsService.getAggregatorById(id);
+    if (!aggregator) throw new Error('Aggregator not found');
+    
+    const credentials = await credentialVaultService.retrieveCredentials(aggregator.credentialId);
+    if (!credentials) throw new Error('Credentials not found');
+
+    try {
+        // Limit to 1000 rows for POC
+        const result = await queryExecutorService.executeQuery({
+            type: aggregator.type as 'mysql' | 'postgresql' | 'mssql',
+            host: aggregator.host,
+            port: aggregator.port,
+            database: aggregator.database,
+            username: credentials.username!,
+            password: (credentials as any).password!,
+        }, {
+            table: tableName,
+            columns: ['*'],
+            limit: 1000
+        });
+
+        webSocketService.sendData({
+            aggregatorId: id,
+            table: tableName,
+            rows: result.data,
+            rowCount: result.rowCount
+        });
+
+        auditLogService?.log({
+            action: 'transfer_table',
+            status: 'success',
+            resourceType: 'table',
+            resourceId: tableName,
+            details: { rowCount: result.rowCount }
+        });
+        return { success: true, count: result.rowCount };
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        auditLogService?.log({
+            action: 'transfer_table',
+            status: 'failure',
+            resourceType: 'table',
+            resourceId: tableName,
+            error: message
+        });
+        throw e;
+    }
+  });
+
+  // Audit Log Handlers
+  ipcMain.handle('audit:log', async (event, data: any) => {
+      if (!auditLogService) return;
+      return auditLogService.log(data);
+  });
+
+  ipcMain.handle('audit:get-recent', async (event, limit: number) => {
+      if (!auditLogService) return [];
+      return auditLogService.getRecentLogs(limit);
   });
 }
 
@@ -361,6 +619,7 @@ app.whenReady().then(async () => {
     await initializeServices();
     console.log('[MAIN] Creating window...');
     createWindow();
+    createTray();
     console.log('[MAIN] Window created successfully');
 
     app.on('activate', () => {
@@ -378,12 +637,11 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  // Keep running in tray
 });
 
 app.on('before-quit', async () => {
+  isQuitting = true;
   // Cleanup services
   if (webSocketService) {
     await webSocketService.disconnect();

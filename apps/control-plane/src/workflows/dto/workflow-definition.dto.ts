@@ -33,11 +33,25 @@ class LoadConfigDto {
   conflictResolution?: 'replace' | 'merge' | 'skip';
 }
 
+const WORKFLOW_ACTIVITY_TYPES = [
+  'extract',
+  'transform',
+  'load',
+  'filter',
+  'join',
+  'multi-extract',
+  'multi-load',
+  'sync',
+  'mini-connector-source',
+  'cloud-connector-source',
+  'cloud-connector-sink',
+] as const;
+
 class ActivityDto {
   @ApiProperty() @IsString() id!: string;
-  @ApiProperty({ enum: ['extract', 'transform', 'load', 'filter', 'join'] })
-  @IsIn(['extract', 'transform', 'load', 'filter', 'join'])
-  type!: string;
+  @ApiProperty({ enum: WORKFLOW_ACTIVITY_TYPES })
+  @IsIn(WORKFLOW_ACTIVITY_TYPES as unknown as string[])
+  type!: (typeof WORKFLOW_ACTIVITY_TYPES)[number];
   @ApiProperty() @IsString() name!: string;
   @ApiProperty() @IsObject() config!: Record<string, any>;
 }

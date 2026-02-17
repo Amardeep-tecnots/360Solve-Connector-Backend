@@ -19,6 +19,13 @@ declare global {
         delete: (id: string) => Promise<{ success: boolean }>;
         test: (id: string) => Promise<{ success: boolean; error?: string }>;
         discoverSchema: (id: string) => Promise<any>;
+        syncSchema: (id: string, schema: any) => Promise<{ success: boolean; error?: string }>;
+        previewTable: (id: string, tableName: string) => Promise<any>;
+        transferTable: (id: string, tableName: string) => Promise<{ success: boolean; count: number }>;
+      };
+      audit: {
+        log: (data: any) => Promise<void>;
+        getRecent: (limit: number) => Promise<any[]>;
       };
       status: {
         getConnectionState: () => Promise<{
@@ -32,6 +39,10 @@ declare global {
           hostname: string;
           cpus: number;
           totalMemory: number;
+          freeMemory: number;
+          uptime: number;
+          processMemory: number;
+          loadAverage: number[];
           version: string;
         }>;
       };

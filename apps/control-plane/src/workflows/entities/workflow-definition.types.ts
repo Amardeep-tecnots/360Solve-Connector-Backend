@@ -1,5 +1,16 @@
 // Activity type discriminator
-export type ActivityType = 'extract' | 'transform' | 'load' | 'filter' | 'join' | 'multi-extract' | 'multi-load' | 'sync';
+export type ActivityType = 
+  | 'extract' 
+  | 'transform' 
+  | 'load' 
+  | 'filter' 
+  | 'join' 
+  | 'multi-extract' 
+  | 'multi-load' 
+  | 'sync'
+  | 'mini-connector-source'
+  | 'cloud-connector-source'
+  | 'cloud-connector-sink';
 
 // Base activity interface
 export interface Activity {
@@ -16,6 +27,29 @@ export interface ExtractConfig {
   columns: string[];
   where?: string;
   limit?: number;
+}
+
+export interface MiniConnectorSourceConfig {
+  connectorId: string;
+  database: string;
+  table: string;
+  columns: string[];
+  where?: string;
+  limit?: number;
+}
+
+export interface CloudConnectorSourceConfig {
+  aggregatorInstanceId: string;
+  resource: string;
+  operation: 'query' | 'scan';
+  query?: string;
+}
+
+export interface CloudConnectorSinkConfig {
+  aggregatorInstanceId: string;
+  resource: string;
+  mode: 'insert' | 'upsert' | 'update';
+  batchSize?: number;
 }
 
 export interface TransformConfig {
@@ -50,7 +84,10 @@ export type ActivityConfig =
   | TransformConfig 
   | LoadConfig 
   | FilterConfig 
-  | JoinConfig;
+  | JoinConfig
+  | MiniConnectorSourceConfig
+  | CloudConnectorSourceConfig
+  | CloudConnectorSinkConfig;
 
 // DAG step definition
 export interface WorkflowStep {

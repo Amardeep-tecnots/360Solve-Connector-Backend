@@ -34,6 +34,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id: string) => safeInvoke('aggregators:delete', id),
     test: (id: string) => safeInvoke('aggregators:test', id),
     discoverSchema: (id: string) => safeInvoke('aggregators:discover-schema', id),
+    syncSchema: (id: string, schema: any) => safeInvoke('aggregators:sync-schema', id, schema),
+    previewTable: (id: string, tableName: string) => safeInvoke('aggregators:preview-table', id, tableName),
+    transferTable: (id: string, tableName: string) => safeInvoke('aggregators:transfer-table', id, tableName),
+  },
+
+  // Audit Log
+  audit: {
+    log: (data: any) => safeInvoke('audit:log', data),
+    getRecent: (limit: number) => safeInvoke('audit:get-recent', limit),
   },
 
   // Status
@@ -59,6 +68,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       'websocket:disconnected',
       'websocket:error',
       'command:received',
+      'command:start',
+      'command:success',
+      'command:error',
       'heartbeat:sent',
       'error:uncaught',
     ];

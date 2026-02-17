@@ -40,7 +40,7 @@ export class ConnectorGateway implements OnGatewayConnection, OnGatewayDisconnec
       }
 
       // Validate API key and register connection
-      const registration = await this.connectionManager.registerConnection(client.id, apiKey, {
+      const registration = await this.connectionManager.registerConnection(client, apiKey, {
         ip: client.handshake.address,
         userAgent: client.handshake.headers['user-agent'],
       });

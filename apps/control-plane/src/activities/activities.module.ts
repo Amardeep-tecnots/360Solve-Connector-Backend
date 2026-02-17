@@ -10,8 +10,10 @@ import { ConnectorClientService } from './handlers/connector-client.service';
 import { DataTransformService } from './handlers/data-transform.service';
 import { ExecutionStateService } from '../executions/services/execution-state.service';
 import { PrismaService } from '../prisma.service';
+import { AggregatorsModule } from '../aggregators/aggregators.module';
 
 @Module({
+  imports: [AggregatorsModule],
   controllers: [ActivitiesController],
   providers: [
     ActivityExecutorService,

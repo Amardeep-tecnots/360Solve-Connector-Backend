@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BaseActivityHandler } from '../handlers/base-activity.handler';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
+import { ExecutionStateService } from '../../executions/services/execution-state.service';
 
 interface JoinConfig {
   type: 'inner' | 'left' | 'right' | 'full';
@@ -12,7 +13,7 @@ interface JoinConfig {
 
 @Injectable()
 export class JoinHandlerService extends BaseActivityHandler {
-  constructor(stateService: any) {
+  constructor(stateService: ExecutionStateService) {
     super(stateService);
   }
 

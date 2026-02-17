@@ -5,8 +5,11 @@ import { ActivityDispatcherService } from './services/activity-dispatcher.servic
 import { ExecutionStateService } from './services/execution-state.service';
 import { ExecutionOrchestratorService } from './services/execution-orchestrator.service';
 import { PrismaService } from '../prisma.service';
+import { ActivitiesModule } from '../activities/activities.module';
+import { WebsocketModule } from '../websocket/websocket.module';
 
 @Module({
+  imports: [ActivitiesModule, WebsocketModule],
   controllers: [ExecutionsController],
   providers: [
     ExecutionsService,

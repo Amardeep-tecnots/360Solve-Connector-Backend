@@ -49,7 +49,7 @@ export class WebSocketService extends EventEmitter {
       this.state.connectorId = validation.connectorId;
       this.state.tenantId = validation.tenantId;
 
-      // Resolve websocket URL (default to connectors namespace on port 3001)
+      // Resolve websocket URL
       const wsUrl = process.env.WEBSOCKET_URL || 'ws://localhost:3001/connectors';
       console.log('[WS] Using websocket URL:', wsUrl);
 
@@ -150,7 +150,7 @@ export class WebSocketService extends EventEmitter {
 
     this.socket.on('heartbeat_ack', () => {
       this.state.lastHeartbeat = new Date();
-      console.log('Heartbeat acknowledged');
+      // console.log('Heartbeat acknowledged');
     });
   }
 
@@ -161,6 +161,40 @@ export class WebSocketService extends EventEmitter {
 
     this.socket.emit('heartbeat', payload);
     this.emit('heartbeat_sent');
+  }
+
+  sendCommandResponse(commandId: string, response: any) {
+    if (!this.socket || !this.socket.connected) {
+      throw new Error('Not connected to cloud');
+    }
+
+    this.socket.emit('command:response', {
+      commandId,
+      response,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  sendSchema(schema: any) {
+    if (!this.socket || !this.socket.connected) {
+      throw new Error('Not connected to cloud');
+    }
+
+    this.socket.emit('schema:discovered', {
+      schema,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  sendData(payload: any) {
+    if (!this.socket || !this.socket.connected) {
+      throw new Error('Not connected to cloud');
+    }
+
+    this.socket.emit('data:transfer', {
+      ...payload,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   private attemptReconnect() {
@@ -205,18 +239,6 @@ export class WebSocketService extends EventEmitter {
     };
 
     this.emit('disconnected', 'manual_disconnect');
-  }
-
-  sendCommandResponse(commandId: string, response: any) {
-    if (!this.socket || !this.socket.connected) {
-      throw new Error('Not connected to cloud');
-    }
-
-    this.socket.emit('command_response', {
-      commandId,
-      response,
-      timestamp: new Date().toISOString(),
-    });
   }
 
   getConnectionState(): ConnectionState {

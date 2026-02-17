@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma.service';
+import { Socket } from 'socket.io';
 
 interface ConnectionInfo {
   socketId: string;
+  socket: Socket;
   tenantId: string;
   connectorId: string;
   apiKey: string;
@@ -23,10 +25,12 @@ export class ConnectionManagerService {
   constructor(private readonly prisma: PrismaService) {}
 
   async registerConnection(
-    socketId: string,
+    client: Socket,
     apiKey: string,
     metadata: { ip: string; userAgent: string }
   ): Promise<{ tenantId: string; connectorId: string } | null> {
+    const socketId = client.id;
+    
     // Validate API key format first
     const keyParts = apiKey.split('_');
     if (keyParts.length !== 4 || keyParts[0] !== 'vmc') {
@@ -75,6 +79,7 @@ export class ConnectionManagerService {
     // Store connection
     this.connections.set(socketId, {
       socketId,
+      socket: client,
       tenantId,
       connectorId: matchedConnector.id,
       apiKey,
@@ -114,6 +119,12 @@ export class ConnectionManagerService {
 
   getConnection(socketId: string): ConnectionInfo | undefined {
     return this.connections.get(socketId);
+  }
+
+  getConnectionByConnectorId(connectorId: string): ConnectionInfo | undefined {
+    return Array.from(this.connections.values()).find(
+      (conn) => conn.connectorId === connectorId
+    );
   }
 
   getConnectionByTenant(tenantId: string): ConnectionInfo | undefined {
@@ -165,5 +176,15 @@ export class ConnectionManagerService {
       offline: 0, // TODO: Track offline connectors from database
       lastHeartbeat,
     };
+  }
+
+  // New method to send messages
+  sendMessage(socketId: string, event: string, data: any): boolean {
+    const connection = this.connections.get(socketId);
+    if (connection && connection.socket) {
+      connection.socket.emit(event, data);
+      return true;
+    }
+    return false;
   }
 }

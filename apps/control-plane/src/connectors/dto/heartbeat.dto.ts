@@ -42,6 +42,12 @@ export class HeartbeatDto {
   @IsOptional()
   maxConcurrentJobs?: number;
 
+  @ApiPropertyOptional({ description: 'Number of active commands' })
+  @IsInt()
+  @Min(0)
+  @IsOptional()
+  activeCommands?: number;
+
   @ApiPropertyOptional({ description: 'OS Information' })
   @IsString()
   @IsOptional()

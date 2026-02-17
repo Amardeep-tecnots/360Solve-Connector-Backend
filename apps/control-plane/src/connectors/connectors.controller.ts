@@ -8,9 +8,11 @@ import {
   Param,
   Query,
   UseGuards,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { ConnectorsService } from './connectors.service';
+import { MiniConnectorProxyService } from './mini-connector-proxy.service';
 import { CreateConnectorDto } from './dto/create-connector.dto';
 import { UpdateConnectorDto } from './dto/update-connector.dto';
 import { ConnectorQueryDto } from './dto/connector-query.dto';
@@ -26,7 +28,48 @@ import { ConnectorApiKeyGuard } from './guards/connector-api-key.guard';
 @ApiTags('Connectors')
 @ApiBearerAuth()
 export class ConnectorsController {
-  constructor(private readonly connectorsService: ConnectorsService) {}
+  constructor(
+    private readonly connectorsService: ConnectorsService,
+    private readonly miniConnectorProxyService: MiniConnectorProxyService,
+  ) {}
+
+  @Get('mini/:id/databases')
+  @ApiResponse({ status: 200 })
+  @UseGuards(JwtAuthGuard, TenantMemberGuard)
+  async getMiniDatabases(
+    @Param('id') id: string,
+    @TenantId() tenantId: string,
+  ) {
+    const data = await this.miniConnectorProxyService.getDatabases(tenantId, id);
+    return { success: true, data };
+  }
+
+  @Get('mini/:id/tables')
+  @ApiResponse({ status: 200 })
+  @UseGuards(JwtAuthGuard, TenantMemberGuard)
+  async getMiniTables(
+    @Param('id') id: string,
+    @TenantId() tenantId: string,
+    @Query('database') database: string,
+  ) {
+    if (!database) throw new BadRequestException('Database parameter is required');
+    const data = await this.miniConnectorProxyService.getTables(tenantId, id, database);
+    return { success: true, data };
+  }
+
+  @Get('mini/:id/columns')
+  @ApiResponse({ status: 200 })
+  @UseGuards(JwtAuthGuard, TenantMemberGuard)
+  async getMiniColumns(
+    @Param('id') id: string,
+    @TenantId() tenantId: string,
+    @Query('database') database: string,
+    @Query('table') table: string,
+  ) {
+    if (!database || !table) throw new BadRequestException('Database and table parameters are required');
+    const data = await this.miniConnectorProxyService.getColumns(tenantId, id, database, table);
+    return { success: true, data };
+  }
 
   @Post()
   @ApiResponse({ status: 201, type: ConnectorResponseDto })

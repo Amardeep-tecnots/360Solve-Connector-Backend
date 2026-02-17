@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { BaseActivityHandler } from '../handlers/base-activity.handler';
 import { DataTransformService } from '../handlers/data-transform.service';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
+import { ExecutionStateService } from '../../executions/services/execution-state.service';
 
 interface FilterConfig {
   condition: string; // JavaScript expression returning boolean
@@ -12,7 +13,7 @@ interface FilterConfig {
 export class FilterHandlerService extends BaseActivityHandler {
   constructor(
     private readonly transformService: DataTransformService,
-    stateService: any,
+    stateService: ExecutionStateService,
   ) {
     super(stateService);
   }
