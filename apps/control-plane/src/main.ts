@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import * as bodyParser from 'body-parser';
 import { AppModule } from './app.module';
 import { LoggerService } from '@360solve/shared';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -14,6 +15,10 @@ async function bootstrap() {
 
   // Use our custom logger
   app.useLogger(logger);
+
+  // Increase body parser limit to handle large requests (e.g., SDK generation with large OpenAPI specs)
+  app.use(bodyParser.json({ limit: '100mb' }));
+  app.use(bodyParser.urlencoded({ limit: '100mb', extended: true }));
 
   // Global logging interceptor
   const loggingInterceptor = app.get(LoggingInterceptor);

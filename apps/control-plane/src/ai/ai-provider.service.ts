@@ -15,19 +15,36 @@ export enum AIProvider {
 
 /**
  * Available models for each provider
+ * Organized by tier for smart selection
  */
 export const AI_MODELS: Record<AIProvider, string[]> = {
   [AIProvider.OPENROUTER]: [
+    // === FREE MODELS (Best for budget-constrained usage) ===
+    // Tier 1: General purpose (Most reliable free models)
+    'meta-llama/llama-3.1-8b-instruct:free', // 128K context - Most reliable free
+    'meta-llama/llama-3.3-70b-instruct:free', // 128K context - Most powerful free
+    
+    // Tier 2: Additional free options
+    'google/gemma-3-27b-it:free',            // 131K context - Multimodal
+    'nvidia/nemotron-nano-12b-vl-2:free',   // 128K context - NVIDIA optimized
+    'deepseek/deepseek-chat:free',           // 64K context - Good for code
+    'mistralai/mistral-nemo:free',           // 128K context - Fast option
+    
+    // === PAID MODELS (For when funded) ===
+    // Premium (Enterprise)
+    'anthropic/claude-3.5-sonnet-20241022', // 200K context - Best quality
+    'anthropic/claude-3-opus-20240229',     // 200K context - Maximum quality
+    
+    // Mid-tier (Balanced)
+    'anthropic/claude-3-haiku-20240307',    // 200K context - Fast & good
+    'openai/gpt-4o-mini',                   // 128K context - Cost effective
+    'google/gemini-pro-1.5',                // 1M context - Long inputs
+    
+    // Standard
     'openai/gpt-4o',
-    'openai/gpt-4o-mini',
     'openai/gpt-4-turbo',
-    'anthropic/claude-3.5-sonnet',
-    'anthropic/claude-3-haiku',
-    'meta-llama/llama-3.1-70b-instruct',
-    'meta-llama/llama-3.1-8b-instruct',
-    'mistralai/mistral-7b-instruct',
-    'google/gemini-pro-1.5',
     'deepseek/deepseek-chat',
+    'mistralai/mistral-7b-instruct',
   ],
   [AIProvider.OPENAI]: [
     'gpt-4o',
@@ -446,24 +463,44 @@ export class AIProviderService {
 
   /**
    * Determine provider from model name
+   * All models through OpenRouter for cost-effective access
    */
   private getProviderFromModel(model: string): AIProvider {
-    if (model.startsWith('openai/') || model.startsWith('google/')) {
+    // Check if it's a free tier model (these are accessed via OpenRouter)
+    if (model.includes(':free')) {
       return AIProvider.OPENROUTER;
     }
-    if (model.includes('claude-') || model.startsWith('anthropic/')) {
+    
+    // Check for models that should go through OpenRouter
+    if (model.startsWith('qwen/') || 
+        model.startsWith('nvidia/') || 
+        model.startsWith('meta-llama/') || 
+        model.startsWith('google/') ||
+        model.startsWith('openai/') ||
+        model.startsWith('anthropic/') ||
+        model.startsWith('mistralai/') ||
+        model.startsWith('deepseek/') ||
+        model.startsWith('stepfun/') ||
+        model.startsWith('arcee-ai/') ||
+        model.startsWith('z-ai/')) {
       return AIProvider.OPENROUTER;
     }
-    if (model.startsWith('meta-llama/') || model.startsWith('mistralai/') || model.startsWith('deepseek/')) {
-      return AIProvider.OPENROUTER;
-    }
-    if (['gpt-4o', 'gpt-4', 'gpt-3.5'].some(m => model.startsWith(m))) {
+    
+    // Check for direct OpenAI models
+    if (['gpt-4o', 'gpt-4', 'gpt-3.5', 'gpt-oss'].some(m => model.startsWith(m))) {
+      // If it's the gpt-oss variant, use OpenRouter
+      if (model.startsWith('gpt-oss')) {
+        return AIProvider.OPENROUTER;
+      }
       return AIProvider.OPENAI;
     }
+    
+    // Check for direct Anthropic models
     if (model.startsWith('claude-')) {
       return AIProvider.ANTHROPIC;
     }
-    // Default to OpenRouter for unknown models
+    
+    // Default to OpenRouter for all other models (most flexible)
     return AIProvider.OPENROUTER;
   }
 
@@ -483,5 +520,119 @@ export class AIProviderService {
       default:
         return AIProvider.OPENROUTER;
     }
+  }
+
+  /**
+   * Smart model selection for SDK generation based on spec size
+   * Returns the best model for the given endpoint count and spec size
+   */
+  selectBestModel(
+    endpointCount: number,
+    specSizeKB: number,
+    tier: 'free' | 'paid' = 'free'
+  ): { model: string; maxTokens: number; chunkSize: number; fallback?: string } {
+    // Using meta-llama models as primary (most reliable for free tier)
+
+    // Very small specs (< 30 endpoints) - can use simpler models
+    if (endpointCount <= 30) {
+      if (tier === 'paid') {
+        return {
+          model: 'anthropic/claude-3.5-sonnet-20241022',
+          maxTokens: 8000,
+          chunkSize: 30,
+          fallback: 'openai/gpt-4o-mini',
+        };
+      }
+      return {
+        model: 'meta-llama/llama-3.1-8b-instruct:free',
+        maxTokens: 8000,
+        chunkSize: 30,
+        fallback: 'meta-llama/llama-3.3-70b-instruct:free',
+      };
+    }
+
+    // Small-medium specs (30-100 endpoints)
+    if (endpointCount <= 100) {
+      if (tier === 'paid') {
+        return {
+          model: 'anthropic/claude-3.5-sonnet-20241022',
+          maxTokens: 16000,
+          chunkSize: 40,
+          fallback: 'anthropic/claude-3-haiku-20240307',
+        };
+      }
+      return {
+        model: 'meta-llama/llama-3.1-8b-instruct:free',
+        maxTokens: 16000,
+        chunkSize: 40,
+        fallback: 'meta-llama/llama-3.3-70b-instruct:free',
+      };
+    }
+
+    // Medium specs (100-300 endpoints)
+    if (endpointCount <= 300) {
+      if (tier === 'paid') {
+        return {
+          model: 'anthropic/claude-3.5-sonnet-20241022',
+          maxTokens: 24000,
+          chunkSize: 50,
+          fallback: 'anthropic/claude-3-haiku-20240307',
+        };
+      }
+      return {
+        model: 'meta-llama/llama-3.3-70b-instruct:free',
+        maxTokens: 24000,
+        chunkSize: 50,
+        fallback: 'google/gemma-3-27b-it:free',
+      };
+    }
+
+    // Large specs (300-500 endpoints) - need chunking
+    if (endpointCount <= 500) {
+      if (tier === 'paid') {
+        return {
+          model: 'anthropic/claude-3.5-sonnet-20241022',
+          maxTokens: 32000,
+          chunkSize: 60,
+          fallback: 'anthropic/claude-3-haiku-20240307',
+        };
+      }
+      return {
+        model: 'meta-llama/llama-3.3-70b-instruct:free',
+        maxTokens: 32000,
+        chunkSize: 60,
+        fallback: 'google/gemma-3-27b-it:free',
+      };
+    }
+
+    // Enterprise specs (500+ endpoints) - aggressive chunking required
+    if (tier === 'paid') {
+      return {
+        model: 'anthropic/claude-3.5-sonnet-20241022',
+        maxTokens: 32000,
+        chunkSize: 40,
+        fallback: 'anthropic/claude-3-haiku-20240307',
+      };
+    }
+    return {
+      model: 'meta-llama/llama-3.3-70b-instruct:free',
+      maxTokens: 32000,
+      chunkSize: 40,
+      fallback: 'google/gemma-3-27b-it:free',
+    };
+  }
+
+  /**
+   * Get all available free models
+   */
+  getFreeModels(): string[] {
+    return AI_MODELS[AIProvider.OPENROUTER].filter(m => m.includes(':free'));
+  }
+
+  /**
+   * Get all paid/premium models
+   */
+  getPremiumModels(): string[] {
+    return AI_MODELS[AIProvider.OPENROUTER].filter(m => !m.includes(':free'));
   }
 }
