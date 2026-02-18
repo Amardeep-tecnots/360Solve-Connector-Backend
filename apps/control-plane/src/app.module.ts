@@ -12,6 +12,8 @@ import { UsersModule } from './users/users.module';
 import { PrismaService } from './prisma.service';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { WebsocketModule } from './websocket/websocket.module';
+import { StorageModule } from './storage/storage.module';
+import { AIModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -37,6 +39,8 @@ import { WebsocketModule } from './websocket/websocket.module';
     TenantsModule,
     UsersModule,
     WebsocketModule,
+    StorageModule,
+    AIModule,
   ],
   providers: [PrismaService, LoggingInterceptor],
   exports: [PrismaService],

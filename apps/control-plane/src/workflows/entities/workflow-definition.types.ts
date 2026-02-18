@@ -59,11 +59,23 @@ export interface TransformConfig {
 
 export interface LoadConfig {
   aggregatorInstanceId: string;
-  table: string;
+  table?: string;  // Optional - can be inferred from sourceMetadata
   mode: 'insert' | 'upsert' | 'create';
   conflictKey?: string | string[];
   conflictResolution?: 'replace' | 'merge' | 'skip';
   columnMappings?: { source: string; destination: string }[];
+  /**
+   * Source metadata to infer table name when not explicitly provided.
+   * This enables automatic table name resolution from source activity.
+   */
+  sourceMetadata?: {
+    /** The table name from the source activity */
+    tableName?: string;
+    /** Original column names from source */
+    columns?: string[];
+    /** Schema information from source */
+    schema?: Record<string, string>;
+  };
 }
 
 export interface FilterConfig {

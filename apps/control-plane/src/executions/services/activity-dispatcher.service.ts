@@ -1,9 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   Activity,
   WorkflowDefinition,
   WorkflowStep,
   MiniConnectorSourceConfig,
+  LoadConfig,
+  ExtractConfig,
 } from '../../workflows/entities/workflow-definition.types';
 import { ActivityExecutorService } from '../../activities/services/activity-executor.service';
 import { CommandDispatcherService } from '../../websocket/services/command-dispatcher.service';
@@ -19,6 +21,8 @@ export interface DispatchActivityParams {
 
 @Injectable()
 export class ActivityDispatcherService {
+  private readonly logger = new Logger(ActivityDispatcherService.name);
+
   constructor(
     private readonly activityExecutor: ActivityExecutorService,
     private readonly commandDispatcher: CommandDispatcherService,
@@ -34,6 +38,29 @@ export class ActivityDispatcherService {
       case 'load':
       case 'filter':
       case 'join': {
+        // For load activities, inject source metadata from previous steps
+        let activityConfig = activity.config;
+        
+        if (activity.type === 'load') {
+          const loadConfig = activityConfig as LoadConfig;
+          // Only inject source metadata if not already provided
+          if (!loadConfig.sourceMetadata && step.dependsOn && step.dependsOn.length > 0) {
+            const sourceMetadata = await this.extractSourceMetadata(
+              executionId, 
+              tenantId, 
+              step.dependsOn,
+              workflowDefinition
+            );
+            if (sourceMetadata) {
+              this.logger.log(`Injecting source metadata into load activity: ${JSON.stringify(sourceMetadata)}`);
+              activityConfig = {
+                ...loadConfig,
+                sourceMetadata,
+              };
+            }
+          }
+        }
+
         const inputs = await this.collectStepInputs(executionId, tenantId, step);
         const result = await this.activityExecutor.executeActivity({
           executionId,
@@ -41,7 +68,7 @@ export class ActivityDispatcherService {
           activityId: activity.id,
           stepId: step.id,
           activityType: activity.type as any,
-          config: activity.config as any,
+          config: activityConfig as any,
           inputs,
         });
 
@@ -49,7 +76,11 @@ export class ActivityDispatcherService {
           const message = result.error?.message || 'Activity execution failed';
           throw new Error(message);
         }
-        return result.data;
+        
+        // Add source metadata to output for downstream activities
+        const output = result.data;
+        
+        return output;
       }
 
       case 'mini-connector-source': {
@@ -75,7 +106,17 @@ export class ActivityDispatcherService {
           config.connectorId,
         );
 
-        return response;
+        // Wrap response with source metadata
+        return {
+          data: response.data || response,
+          rowCount: response.rowCount,
+          columns: response.columns || config.columns,
+          _sourceMetadata: {
+            tableName: config.table,
+            columns: config.columns,
+            database: config.database,
+          },
+        };
       }
 
       case 'cloud-connector-source':
@@ -86,6 +127,66 @@ export class ActivityDispatcherService {
       default:
         throw new Error(`No executor registered for activity type "${activity.type}"`);
     }
+  }
+
+  /**
+   * Extract source metadata from previous step outputs to inject into load activity
+   */
+  private async extractSourceMetadata(
+    executionId: string,
+    tenantId: string,
+    dependsOn: string[],
+    workflowDefinition: WorkflowDefinition,
+  ): Promise<{ tableName?: string; columns?: string[]; schema?: Record<string, string> } | null> {
+    const state = await this.stateService.getExecutionState(executionId, tenantId);
+    if (!state?.stepOutputs) return null;
+
+    // Get the first dependency's output
+    for (const depStepId of dependsOn) {
+      const output = state.stepOutputs[depStepId];
+      if (!output) continue;
+
+      // Check if output has _sourceMetadata attached
+      if (output._sourceMetadata) {
+        return output._sourceMetadata;
+      }
+
+      // Find the source activity that produced this output
+      const depStep = workflowDefinition.steps.find(s => s.id === depStepId);
+      if (!depStep) continue;
+
+      const sourceActivity = workflowDefinition.activities.find(a => a.id === depStep.activityId);
+      if (!sourceActivity) continue;
+
+      // Extract metadata based on activity type
+      if (sourceActivity.type === 'mini-connector-source') {
+        const config = sourceActivity.config as MiniConnectorSourceConfig;
+        return {
+          tableName: config.table,
+          columns: config.columns,
+        };
+      }
+
+      if (sourceActivity.type === 'extract') {
+        const config = sourceActivity.config as ExtractConfig;
+        return {
+          tableName: config.table,
+          columns: config.columns,
+        };
+      }
+
+      // For array outputs, try to infer from first row
+      if (Array.isArray(output) && output.length > 0) {
+        const firstRow = output[0];
+        if (firstRow && typeof firstRow === 'object') {
+          return {
+            columns: Object.keys(firstRow),
+          };
+        }
+      }
+    }
+
+    return null;
   }
 
   private async collectStepInputs(

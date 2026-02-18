@@ -122,4 +122,26 @@ export class StorageService {
   getPublicUrl(key: string): string {
     return `${process.env.S3_ENDPOINT || 'http://localhost:9000'}/${this.bucketName}/${key}`;
   }
+
+  /**
+   * Convenience method for uploading file content
+   */
+  async uploadFile(key: string, content: string, contentType?: string): Promise<string> {
+    const result = await this.upload(key, content, contentType);
+    if (!result.success) {
+      throw new Error(result.error || 'Upload failed');
+    }
+    return result.url || key;
+  }
+
+  /**
+   * Convenience method for downloading file content as string
+   */
+  async downloadFile(key: string): Promise<string> {
+    const result = await this.download(key);
+    if (!result.success || !result.data) {
+      throw new Error(result.error || 'Download failed');
+    }
+    return result.data.toString('utf-8');
+  }
 }

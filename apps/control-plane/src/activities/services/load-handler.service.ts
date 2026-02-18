@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { BaseActivityHandler } from '../handlers/base-activity.handler';
 import { ConnectorClientService } from '../handlers/connector-client.service';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
@@ -7,12 +7,20 @@ import { PrismaService } from '../../prisma.service';
 
 interface LoadConfig {
   aggregatorInstanceId: string;
-  table: string;
+  table?: string;
   mode: 'insert' | 'upsert' | 'create';
   conflictKey?: string | string[];
   conflictResolution?: 'replace' | 'merge' | 'skip';
   columnMappings?: { source: string; destination: string }[];
   batchSize?: number;
+  /** 
+   * Source metadata from previous activity to infer table name.
+   * When table is not provided, it will be inferred from source metadata.
+   */
+  sourceMetadata?: {
+    tableName?: string;
+    columns?: string[];
+  };
 }
 
 @Injectable()
@@ -61,6 +69,15 @@ export class LoadHandlerService extends BaseActivityHandler {
       // Get aggregator instance
       const instance = await this.getInstance(config.aggregatorInstanceId, context.tenantId);
 
+      // Resolve the actual table name - this is the key fix for the "undefined" bug
+      const resolvedTableName = this.resolveTableName(config, inputData);
+      
+      // Update config with resolved table name for connector client
+      const loadConfig = {
+        ...config,
+        table: resolvedTableName,
+      };
+
       // Apply column mappings if provided
       const dataToLoad = this.applyColumnMappings(inputData, config.columnMappings);
 
@@ -74,7 +91,7 @@ export class LoadHandlerService extends BaseActivityHandler {
         const result = await this.connectorClient.loadData(
           instance,
           batch,
-          config,
+          loadConfig,
           context
         );
 
@@ -188,5 +205,66 @@ export class LoadHandlerService extends BaseActivityHandler {
   private isRetryableError(error: any): boolean {
     const retryableCodes = ['NETWORK_ERROR', 'TIMEOUT', 'DEADLOCK'];
     return retryableCodes.some(code => error.code === code);
+  }
+
+  /**
+   * Resolve the actual table name for the load operation.
+   * Priority:
+   * 1. Explicitly provided table name in config
+   * 2. Source metadata from config
+   * 3. Source metadata from input data (_sourceMetadata)
+   * 4. Infer from input data structure (first row keys)
+   * 5. Throw error if nothing available
+   */
+  private resolveTableName(config: LoadConfig, inputData: any): string {
+    // 1. Use explicitly provided table name
+    if (config.table && config.table !== 'undefined') {
+      return config.table;
+    }
+
+    // 2. Use source metadata from config if provided
+    if (config.sourceMetadata?.tableName) {
+      return config.sourceMetadata.tableName;
+    }
+
+    // 3. Try to infer from input data - check for _sourceMetadata in wrapped response
+    if (Array.isArray(inputData) && inputData.length > 0) {
+      const firstRow = inputData[0];
+      
+      if (firstRow && typeof firstRow === 'object') {
+        // Check for _sourceMetadata (set by dispatcher)
+        const sourceMeta = firstRow as any;
+        if (sourceMeta._sourceMetadata?.tableName) {
+          return sourceMeta._sourceMetadata.tableName;
+        }
+        
+        // Check for common table name fields
+        const tableNameFields = ['_table', 'tableName', 'table', '__table'];
+        for (const field of tableNameFields) {
+          if (firstRow[field]) {
+            return firstRow[field];
+          }
+        }
+        
+        // Check for metadata in a nested structure
+        if (firstRow._metadata?.tableName) {
+          return firstRow._metadata.tableName;
+        }
+      }
+    }
+
+    // 4. Also check if the entire input has _sourceMetadata (when input is wrapped)
+    if (inputData && typeof inputData === 'object' && !Array.isArray(inputData)) {
+      const inputAny = inputData as any;
+      if (inputAny._sourceMetadata?.tableName) {
+        return inputAny._sourceMetadata.tableName;
+      }
+    }
+
+    // 5. Throw clear error instead of using undefined
+    throw new BadRequestException(
+      'Table name is required for load activity. Provide it in config.table, ' +
+      'config.sourceMetadata.tableName, or ensure the source data includes table metadata.'
+    );
   }
 }
