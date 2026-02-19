@@ -6,6 +6,7 @@ import { CodeGeneratorService } from './code-generator.service';
 import { WasmCompilerService } from './wasm-compiler.service';
 import { CodeValidatorService } from './validators/code-validator.service';
 import { SDKGeneratorService } from './sdk-generator.service';
+import { SDKExecutionService } from './sdk-execution.service';
 import { WorkflowGeneratorService } from './workflow-generator.service';
 import { AIController } from './ai.controller';
 import { StorageModule } from '../storage/storage.module';
@@ -21,12 +22,14 @@ import { PrismaService } from '../prisma.service';
     WasmCompilerService,
     CodeValidatorService,
     SDKGeneratorService,
+    SDKExecutionService,
     WorkflowGeneratorService,
     PrismaService,
   ],
   exports: [
     AIProviderService,
     SDKGeneratorService,
+    SDKExecutionService,
     WorkflowGeneratorService,
   ],
 })

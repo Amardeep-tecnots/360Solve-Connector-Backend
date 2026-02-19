@@ -12,7 +12,8 @@ export interface GeneratedSDK {
   id: string;
   name: string;
   code: string;
-  wasmBinary?: string;
+  wasmBinary?: string | Buffer | null;
+  jsCode?: string;
   openApiSpec: string;
   createdAt: Date;
 }
@@ -55,7 +56,8 @@ export class SDKGeneratorService {
     success: boolean;
     sdkId?: string;
     code?: string;
-    wasmBinary?: string;
+    wasmBinary?: string | Buffer | null;
+    jsCode?: string;
     errors?: string[];
     chunksProcessed?: number;
     modelUsed?: string;
@@ -76,7 +78,34 @@ export class SDKGeneratorService {
         };
       }
 
-      const className = request.className || 'GeneratedSDK';
+      // Determine the class name and aggregator ID
+      // Priority: 1) aggregatorId (link to existing), 2) className, 3) default
+      let sdkId: string;
+      let aggregatorName: string;
+      
+      if (request.aggregatorId) {
+        // Link to existing aggregator - get its name
+        const existingAgg = await this.prisma.aggregator.findUnique({
+          where: { id: request.aggregatorId },
+        });
+        
+        if (!existingAgg) {
+          return { 
+            success: false, 
+            errors: [`Aggregator not found: ${request.aggregatorId}`] 
+          };
+        }
+        
+        sdkId = request.aggregatorId;
+        aggregatorName = existingAgg.name;
+        this.logger.log(`Linking SDK to existing aggregator: ${existingAgg.name}`);
+      } else {
+        // Create new aggregator
+        sdkId = `sdk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        aggregatorName = request.className || 'GeneratedSDK';
+      }
+      
+      const className = aggregatorName;
       this.logger.log(`Generating SDK: ${className} from OpenAPI spec (tier: ${this.aiTier})`);
 
       // Step 1: Parse the OpenAPI spec
@@ -136,8 +165,6 @@ export class SDKGeneratorService {
       const compiled = await this.wasmCompiler.compile(sdkCode);
 
       // Step 6: Save to database and storage
-      const sdkId = `sdk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
       // Store code in S3
       await this.storage.uploadFile(
         `tenants/global/sdks/${sdkId}/code.ts`,
@@ -145,29 +172,53 @@ export class SDKGeneratorService {
         'text/typescript'
       );
 
-      // Store metadata in database
-      await this.prisma.aggregator.create({
-        data: {
-          id: sdkId,
-          tenantId: 'system', // System-level aggregator
-          name: className,
-          description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
-          category: 'API',
-          type: 'CLOUD',
-          version: '1.0.0',
-          capabilities: ['read', 'query'],
-          authMethods: ['apiKey', 'bearer'],
-          configSchema: {
-            baseUrl: parsedSpec.servers?.[0]?.url || '',
-            authType: 'bearer',
-            endpointCount,
-            modelUsed: modelConfig.model,
-          },
-          sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
-          sdkVersion: 1,
-          isPublic: false,
-        },
+      // Check if we're updating an existing aggregator or creating new
+      const existingAggregator = await this.prisma.aggregator.findUnique({
+        where: { id: sdkId },
       });
+
+      if (existingAggregator) {
+        // Update existing aggregator with SDK reference
+        await this.prisma.aggregator.update({
+          where: { id: sdkId },
+          data: {
+            name: className,
+            description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
+            configSchema: {
+              baseUrl: parsedSpec.servers?.[0]?.url || '',
+              authType: 'bearer',
+              endpointCount,
+              modelUsed: modelConfig.model,
+            },
+            sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
+            sdkVersion: (existingAggregator.sdkVersion || 0) + 1,
+          },
+        });
+      } else {
+        // Create new aggregator
+        await this.prisma.aggregator.create({
+          data: {
+            id: sdkId,
+            tenantId: 'system',
+            name: className,
+            description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
+            category: 'API',
+            type: 'CLOUD',
+            version: '1.0.0',
+            capabilities: ['read', 'query'],
+            authMethods: ['apiKey', 'bearer'],
+            configSchema: {
+              baseUrl: parsedSpec.servers?.[0]?.url || '',
+              authType: 'bearer',
+              endpointCount,
+              modelUsed: modelConfig.model,
+            },
+            sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
+            sdkVersion: 1,
+            isPublic: false,
+          },
+        });
+      }
 
       this.logger.log(`SDK generated successfully: ${sdkId}`);
 
@@ -582,7 +633,7 @@ Respond ONLY with the TypeScript code, no markdown formatting.`;
   ): Promise<{
     success: boolean;
     code?: string;
-    wasmBinary?: string;
+    wasmBinary?: string | Buffer | null;
     errors?: string[];
   }> {
     try {

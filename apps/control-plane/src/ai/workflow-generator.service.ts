@@ -42,7 +42,8 @@ export class WorkflowGeneratorService {
       let sourceContext = '';
       let destContext = '';
 
-      if (request.source.aggregatorId) {
+      // Safely access source and destination with null checks
+      if (request.source?.aggregatorId) {
         const sourceAgg = await this.prisma.aggregator.findUnique({
           where: { id: request.source.aggregatorId },
         });
@@ -51,10 +52,18 @@ export class WorkflowGeneratorService {
           if (request.source.table) {
             sourceContext += `, Table: ${request.source.table}`;
           }
+        } else {
+          sourceContext = `Source: Mini Connector (${request.source.aggregatorId})`;
+        }
+      } else if (request.source) {
+        sourceContext = `Source: ${request.source.type || 'Unknown type'}`;
+        if (request.source.table) {
+          sourceContext += `, Table: ${request.source.table}`;
         }
       }
 
-      if (request.destination.aggregatorId) {
+      // Safely access destination with null checks
+      if (request.destination?.aggregatorId) {
         const destAgg = await this.prisma.aggregator.findUnique({
           where: { id: request.destination.aggregatorId },
         });
@@ -63,6 +72,13 @@ export class WorkflowGeneratorService {
           if (request.destination.table) {
             destContext += `, Table: ${request.destination.table}`;
           }
+        } else {
+          destContext = `Destination: AI SDK (${request.destination.aggregatorId})`;
+        }
+      } else if (request.destination) {
+        destContext = `Destination: ${request.destination.type || 'Unknown type'}`;
+        if (request.destination.table) {
+          destContext += `, Table: ${request.destination.table}`;
         }
       }
 

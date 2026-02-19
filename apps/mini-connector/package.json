@@ -11,7 +11,7 @@
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
     "package": "electron-builder",
-    "package:win": "electron-builder --win",
+    "package:win": "set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win --x64",
     "package:mac": "electron-builder --mac",
     "package:linux": "electron-builder --linux"
   },
@@ -29,6 +29,7 @@
     "better-sqlite3": "^9.4.3",
     "clsx": "^2.1.1",
     "crypto": "^1.0.1",
+    "dotenv": "^16.4.1",
     "electron-store": "^8.1.0",
     "framer-motion": "^12.34.0",
     "lucide-react": "^0.564.0",
@@ -61,17 +62,23 @@
     "vite": "^5.0.11"
   },
   "build": {
-    "appId": "com.vansales.miniconnector",
-    "productName": "VanSales Mini Connector",
+    "appId": "com.360solve.nia",
+    "productName": "NIA",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/dotenv/**/*"
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
       "icon": "assets/icon.ico"
     },
     "mac": {
@@ -81,6 +88,16 @@
     "linux": {
       "target": "AppImage",
       "icon": "assets/icon.png"
-    }
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "28.1.0",
+    "afterPack": "./afterPack.js",
+    "forceCodeSigning": false
   }
 }

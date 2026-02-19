@@ -1,4 +1,7 @@
-import 'dotenv/config';
+// Only load dotenv in development mode
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
 console.log('[MAIN] File loading...');
 
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron';
@@ -181,7 +184,7 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   } else {
     console.log('[MAIN] Loading from file...');
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    mainWindow.loadFile(path.join(__dirname, 'renderer/index.html'));
   }
 
   // Add error handlers

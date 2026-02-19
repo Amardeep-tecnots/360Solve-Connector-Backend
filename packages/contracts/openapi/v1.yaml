@@ -587,6 +587,119 @@ paths:
         204:
           description: Connector revoked
 
+  # AI endpoints
+  /ai/generate-workflow:
+    post:
+      tags:
+        - AI
+      summary: Generate workflow from natural language description
+      description: Uses AI to generate a workflow definition based on a natural language description
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateWorkflowRequest'
+      responses:
+        201:
+          description: Workflow generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateWorkflowResponse'
+        400:
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ai/generate-mapping:
+    post:
+      tags:
+        - AI
+      summary: Generate schema mapping between source and destination
+      description: Uses AI to generate field-level mappings between source and destination tables
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateMappingRequest'
+      responses:
+        201:
+          description: Mapping generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateMappingResponse'
+        400:
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ai/providers:
+    get:
+      tags:
+        - AI
+      summary: Get available AI providers and models
+      responses:
+        200:
+          description: List of available providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        models:
+                          type: array
+                          items:
+                            type: string
+
+  /ai/models/{provider}:
+    get:
+      tags:
+        - AI
+      summary: Get models for a specific provider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: List of models
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                      models:
+                        type: array
+                        items:
+                          type: string
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1217,3 +1330,141 @@ components:
               type: string
             details:
               type: object
+
+    # AI schemas
+    GenerateWorkflowRequest:
+      type: object
+      required:
+        - description
+      properties:
+        description:
+          type: string
+          description: Natural language description of the workflow to generate
+          example: Extract customer data from MySQL and sync to Salesforce contacts
+        source:
+          type: object
+          description: Source aggregator details
+          properties:
+            type:
+              type: string
+              enum: [database, api]
+            aggregatorId:
+              type: string
+            table:
+              type: string
+        destination:
+          type: object
+          description: Destination aggregator details
+          properties:
+            type:
+              type: string
+              enum: [database, api]
+            aggregatorId:
+              type: string
+            table:
+              type: string
+        mappings:
+          type: array
+          description: Field mappings between source and destination
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+              destination:
+                type: string
+              transform:
+                type: string
+        model:
+          type: string
+          description: Custom AI model to use
+
+    GenerateWorkflowResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            definition:
+              $ref: '#/components/schemas/WorkflowDefinition'
+            description:
+              type: string
+        errors:
+          type: array
+          items:
+            type: string
+
+    GenerateMappingRequest:
+      type: object
+      required:
+        - sourceSchema
+        - destinationSchema
+      properties:
+        sourceSchema:
+          type: object
+          properties:
+            tableName:
+              type: string
+            columns:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  type:
+                    type: string
+                  nullable:
+                    type: boolean
+        destinationSchema:
+          type: object
+          properties:
+            tableName:
+              type: string
+            columns:
+              type: array
+              items:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  type:
+                    type: string
+                  nullable:
+                    type: boolean
+        description:
+          type: string
+        model:
+          type: string
+
+    GenerateMappingResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            mappings:
+              type: array
+              items:
+                type: object
+                properties:
+                  sourceColumn:
+                    type: string
+                  destinationColumn:
+                    type: string
+                  transform:
+                    type: string
+                  type:
+                    type: string
+            recommendations:
+              type: array
+              items:
+                type: string
+        errors:
+          type: array
+          items:
+            type: string

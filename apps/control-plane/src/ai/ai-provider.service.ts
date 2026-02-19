@@ -1,6 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IsString, IsOptional } from 'class-validator';
+import { IsString, IsOptional, MinLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /**
@@ -138,39 +138,73 @@ export class GenerateSDKRequest {
   model?: string;
 
   @ApiPropertyOptional({ 
-    description: 'SDK class name',
+    description: 'SDK class name - used as the TypeScript class name in generated SDK',
     example: 'MyAPISDK'
   })
   @IsOptional()
   @IsString()
   className?: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Existing aggregator ID to link the SDK to (preserves aggregator name)',
+    example: 'agg_123abc'
+  })
+  @IsOptional()
+  @IsString()
+  aggregatorId?: string;
 }
 
 /**
- * AI Workflow Generation request
+ * AI Workflow Generation request DTO
  */
-export interface GenerateWorkflowRequest {
-  /** Natural language description of the workflow */
-  description: string;
-  /** Source aggregator details */
-  source: {
+export class GenerateWorkflowRequest {
+  @ApiProperty({ 
+    description: 'Natural language description of the workflow to generate',
+    example: 'Extract customer data from MySQL and sync to Salesforce contacts'
+  })
+  @IsString()
+  @MinLength(1, { message: 'Description is required' })
+  description!: string;
+
+  @ApiProperty({ 
+    description: 'Source aggregator details',
+    example: { type: 'database', aggregatorId: 'agg_123', table: 'customers' }
+  })
+  @IsOptional()
+  source?: {
     type: 'database' | 'api';
     aggregatorId?: string;
     table?: string;
   };
-  /** Destination aggregator details */
-  destination: {
+
+  @ApiProperty({ 
+    description: 'Destination aggregator details',
+    example: { type: 'api', aggregatorId: 'agg_456', table: 'contacts' }
+  })
+  @IsOptional()
+  destination?: {
     type: 'database' | 'api';
     aggregatorId?: string;
     table?: string;
   };
-  /** Field mappings */
-  mappings?: {
+
+  @ApiPropertyOptional({ 
+    description: 'Field mappings between source and destination',
+    example: [{ source: 'name', destination: 'FirstName' }, { source: 'email', destination: 'Email' }]
+  })
+  @IsOptional()
+  mappings?: Array<{
     source: string;
     destination: string;
     transform?: string;
-  }[];
-  /** Custom model to use */
+  }>;
+
+  @ApiPropertyOptional({ 
+    description: 'Custom AI model to use',
+    example: 'openai/gpt-4o-mini'
+  })
+  @IsOptional()
+  @IsString()
   model?: string;
 }
 

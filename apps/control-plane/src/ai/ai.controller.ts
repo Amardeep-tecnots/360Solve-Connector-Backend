@@ -1,8 +1,9 @@
 import { Controller, Post, Get, Body, Param, Res, HttpStatus, UseGuards, ValidationPipe, UsePipes } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { Response } from 'express';
 import { AIProviderService, AIProvider, GenerateSDKRequest, GenerateWorkflowRequest, GenerateSchemaMappingRequest } from './ai-provider.service';
 import { SDKGeneratorService } from './sdk-generator.service';
+import { SDKExecutionService } from './sdk-execution.service';
 import { WorkflowGeneratorService } from './workflow-generator.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { IsString, IsOptional, MinLength } from 'class-validator';
@@ -16,6 +17,7 @@ export class AIController {
   constructor(
     private readonly aiProvider: AIProviderService,
     private readonly sdkGenerator: SDKGeneratorService,
+    private readonly sdkExecution: SDKExecutionService,
     private readonly workflowGenerator: WorkflowGeneratorService,
   ) {}
 
@@ -129,9 +131,11 @@ export class AIController {
    * Generate workflow from description
    */
   @Post('generate-workflow')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @ApiOperation({ summary: 'Generate workflow from natural language description' })
+  @ApiBody({ type: GenerateWorkflowRequest })
   @ApiResponse({ status: 201, description: 'Workflow generated successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 400, description: 'Invalid request - description is required' })
   async generateWorkflow(@Body() request: GenerateWorkflowRequest) {
     const result = await this.workflowGenerator.generateWorkflow(request);
     return {
@@ -177,6 +181,82 @@ export class AIController {
     return {
       success: true,
       data: { response },
+    };
+  }
+
+  /**
+   * Get SDK info (methods, config schema)
+   */
+  @Get('sdk/:id/info')
+  @ApiOperation({ summary: 'Get SDK information including available methods' })
+  @ApiResponse({ status: 200, description: 'SDK info' })
+  @ApiResponse({ status: 404, description: 'SDK not found' })
+  async getSDKInfo(@Param('id') id: string) {
+    const info = await this.sdkExecution.getSDKInfo(id);
+    if (!info) {
+      return {
+        success: false,
+        error: { message: 'SDK not found' },
+      };
+    }
+    return {
+      success: true,
+      data: info,
+    };
+  }
+
+  /**
+   * Execute SDK method
+   * 
+   * This endpoint allows executing SDK methods programmatically.
+   * Used by workflow activities to call the generated SDK.
+   */
+  @Post('sdk/:id/execute')
+  @ApiOperation({ summary: 'Execute an SDK method' })
+  @ApiResponse({ status: 200, description: 'Execution result' })
+  @ApiResponse({ status: 400, description: 'Execution failed' })
+  async executeSDKMethod(
+    @Param('id') id: string,
+    @Body() body: {
+      method: string;
+      params?: Record<string, any>;
+      config?: {
+        baseUrl?: string;
+        apiKey?: string;
+        bearerToken?: string;
+        timeout?: number;
+      };
+    }
+  ) {
+    const { method, params, config } = body;
+
+    const result = await this.sdkExecution.executeMethod({
+      tenantId: 'system', // TODO: Get from auth
+      aggregatorId: id,
+      method,
+      params: params || {},
+      config,
+    });
+
+    return {
+      success: result.success,
+      data: result.data,
+      error: result.error,
+      executionTimeMs: result.executionTimeMs,
+    };
+  }
+
+  /**
+   * List all SDKs for a tenant
+   */
+  @Get('sdks/tenant/:tenantId')
+  @ApiOperation({ summary: 'List all SDKs for a tenant' })
+  @ApiResponse({ status: 200, description: 'List of SDKs' })
+  async listTenantSDKs(@Param('tenantId') tenantId: string) {
+    const sdks = await this.sdkExecution.listSDKs(tenantId);
+    return {
+      success: true,
+      data: sdks,
     };
   }
 }
