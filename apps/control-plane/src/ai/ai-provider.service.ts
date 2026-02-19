@@ -31,19 +31,17 @@ export const AI_MODELS: Record<AIProvider, string[]> = {
     'mistralai/mistral-nemo:free',           // 128K context - Fast option
     
     // === PAID MODELS (For when funded) ===
-    // Premium (Enterprise)
-    'anthropic/claude-3.5-sonnet-20241022', // 200K context - Best quality
-    'anthropic/claude-3-opus-20240229',     // 200K context - Maximum quality
+    // Note: Anthropic models are not available via OpenRouter - use direct API or OpenAI instead
+    // Premium (Enterprise) - Using OpenAI models as replacement
+    'openai/gpt-4o',                        // 128K context - Best quality
+    'openai/gpt-4o-mini',                   // 128K context - Cost effective
     
     // Mid-tier (Balanced)
-    'anthropic/claude-3-haiku-20240307',    // 200K context - Fast & good
-    'openai/gpt-4o-mini',                   // 128K context - Cost effective
-    'google/gemini-pro-1.5',                // 1M context - Long inputs
+    'google/gemini-2.0-flash',               // 1M context - Fast & capable
+    'deepseek/deepseek-chat',                // 64K context - Good for code
     
     // Standard
-    'openai/gpt-4o',
     'openai/gpt-4-turbo',
-    'deepseek/deepseek-chat',
     'mistralai/mistral-7b-instruct',
   ],
   [AIProvider.OPENAI]: [
@@ -559,22 +557,24 @@ export class AIProviderService {
   /**
    * Smart model selection for SDK generation based on spec size
    * Returns the best model for the given endpoint count and spec size
+   * Note: Using OpenAI models via OpenRouter for paid tier (verified to work)
    */
   selectBestModel(
     endpointCount: number,
     specSizeKB: number,
     tier: 'free' | 'paid' = 'free'
   ): { model: string; maxTokens: number; chunkSize: number; fallback?: string } {
-    // Using meta-llama models as primary (most reliable for free tier)
+    // Paid tier: Using OpenAI models via OpenRouter (verified to work)
+    // Free tier: Using Meta Llama models (reliable free option)
 
-    // Very small specs (< 30 endpoints) - can use simpler models
+    // Very small specs (< 30 endpoints)
     if (endpointCount <= 30) {
       if (tier === 'paid') {
         return {
-          model: 'anthropic/claude-3.5-sonnet-20241022',
+          model: 'openai/gpt-4o-mini',
           maxTokens: 8000,
           chunkSize: 30,
-          fallback: 'openai/gpt-4o-mini',
+          fallback: 'openai/gpt-4o',
         };
       }
       return {
@@ -589,10 +589,10 @@ export class AIProviderService {
     if (endpointCount <= 100) {
       if (tier === 'paid') {
         return {
-          model: 'anthropic/claude-3.5-sonnet-20241022',
+          model: 'openai/gpt-4o-mini',
           maxTokens: 16000,
           chunkSize: 40,
-          fallback: 'anthropic/claude-3-haiku-20240307',
+          fallback: 'openai/gpt-4o',
         };
       }
       return {
@@ -607,10 +607,10 @@ export class AIProviderService {
     if (endpointCount <= 300) {
       if (tier === 'paid') {
         return {
-          model: 'anthropic/claude-3.5-sonnet-20241022',
+          model: 'openai/gpt-4o',
           maxTokens: 24000,
           chunkSize: 50,
-          fallback: 'anthropic/claude-3-haiku-20240307',
+          fallback: 'openai/gpt-4o-mini',
         };
       }
       return {
@@ -625,10 +625,10 @@ export class AIProviderService {
     if (endpointCount <= 500) {
       if (tier === 'paid') {
         return {
-          model: 'anthropic/claude-3.5-sonnet-20241022',
+          model: 'openai/gpt-4o',
           maxTokens: 32000,
           chunkSize: 60,
-          fallback: 'anthropic/claude-3-haiku-20240307',
+          fallback: 'openai/gpt-4o-mini',
         };
       }
       return {
@@ -642,10 +642,10 @@ export class AIProviderService {
     // Enterprise specs (500+ endpoints) - aggressive chunking required
     if (tier === 'paid') {
       return {
-        model: 'anthropic/claude-3.5-sonnet-20241022',
+        model: 'openai/gpt-4o',
         maxTokens: 32000,
         chunkSize: 40,
-        fallback: 'anthropic/claude-3-haiku-20240307',
+        fallback: 'openai/gpt-4o-mini',
       };
     }
     return {

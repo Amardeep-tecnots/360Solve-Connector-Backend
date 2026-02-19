@@ -101,7 +101,8 @@ export class SDKGeneratorService {
         this.logger.log(`Linking SDK to existing aggregator: ${existingAgg.name}`);
       } else {
         // Create new aggregator
-        sdkId = `sdk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        // Use hyphens instead of underscores - MinIO doesn't support underscores in object names
+        sdkId = `sdk-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         aggregatorName = request.className || 'GeneratedSDK';
       }
       

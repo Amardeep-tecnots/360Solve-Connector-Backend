@@ -199,6 +199,28 @@ Respond ONLY with the JSON, no markdown.`;
     errors?: string[];
   }> {
     try {
+      // Validate input - ensure schemas are provided
+      if (!request.sourceSchema || !request.destinationSchema) {
+        return {
+          success: false,
+          errors: ['sourceSchema and destinationSchema are required'],
+        };
+      }
+
+      if (!request.sourceSchema.tableName || !request.destinationSchema.tableName) {
+        return {
+          success: false,
+          errors: ['sourceSchema.tableName and destinationSchema.tableName are required'],
+        };
+      }
+
+      if (!request.sourceSchema.columns || !request.destinationSchema.columns) {
+        return {
+          success: false,
+          errors: ['sourceSchema.columns and destinationSchema.columns are required'],
+        };
+      }
+
       this.logger.log(`Generating schema mapping from ${request.sourceSchema.tableName} to ${request.destinationSchema.tableName}`);
 
       const systemPrompt = `You are an expert in database schema mapping and data transformation.

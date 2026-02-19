@@ -54,11 +54,36 @@ export class StorageService {
     }
   }
 
+  /**
+   * Extract the object key from an S3 URI or use the key as-is
+   */
+  private parseKey(keyOrUri: string): string {
+    // Handle s3://bucket/key format
+    // We need to be careful not to remove actual path components that look like bucket names
+    if (keyOrUri.startsWith('s3://')) {
+      // Remove 's3://' prefix only
+      let key = keyOrUri.slice(5);
+      // If there's a leading slash issue, fix it
+      if (key.startsWith('/')) {
+        key = key.slice(1);
+      }
+      // Don't try to remove the "bucket" - just keep everything after s3://
+      // The actual bucket is configured separately in this.service
+      return key;
+    }
+    return keyOrUri;
+  }
+
   async download(key: string): Promise<{ success: boolean; data?: Buffer; error?: string }> {
     try {
+      // Parse the key - handle s3:// URI format
+      const parsedKey = this.parseKey(key);
+      
+      this.logger.log(`Downloading from storage, bucket: ${this.bucketName}, key: ${parsedKey}, original: ${key}`);
+
       const command = new GetObjectCommand({
         Bucket: this.bucketName,
-        Key: key,
+        Key: parsedKey,
       });
 
       const response = await this.s3Client.send(command);
@@ -82,9 +107,12 @@ export class StorageService {
 
   async delete(key: string): Promise<{ success: boolean; error?: string }> {
     try {
+      // Parse the key - handle s3:// URI format
+      const parsedKey = this.parseKey(key);
+
       const command = new DeleteObjectCommand({
         Bucket: this.bucketName,
-        Key: key,
+        Key: parsedKey,
       });
 
       await this.s3Client.send(command);
@@ -106,9 +134,12 @@ export class StorageService {
 
   async exists(key: string): Promise<boolean> {
     try {
+      // Parse the key - handle s3:// URI format
+      const parsedKey = this.parseKey(key);
+
       const command = new GetObjectCommand({
         Bucket: this.bucketName,
-        Key: key,
+        Key: parsedKey,
       });
 
       await this.s3Client.send(command);
