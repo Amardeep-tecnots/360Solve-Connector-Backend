@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AIProviderService, GenerateWorkflowRequest, GenerateSchemaMappingRequest } from './ai-provider.service';
+import { AIProviderService, GenerateWorkflowRequest, GenerateSchemaMappingRequest, TableSchemaDto } from './ai-provider.service';
 import { PrismaService } from '../prisma.service';
 import { WorkflowDefinition, Activity, WorkflowStep } from '../workflows/entities/workflow-definition.types';
 

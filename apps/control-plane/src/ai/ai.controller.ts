@@ -149,7 +149,9 @@ export class AIController {
    * Generate schema mapping
    */
   @Post('generate-mapping')
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   @ApiOperation({ summary: 'Generate schema mapping between source and destination' })
+  @ApiBody({ type: GenerateSchemaMappingRequest })
   @ApiResponse({ status: 201, description: 'Mapping generated successfully' })
   @ApiResponse({ status: 400, description: 'Invalid request' })
   async generateMapping(@Body() request: GenerateSchemaMappingRequest) {

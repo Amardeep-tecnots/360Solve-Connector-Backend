@@ -193,6 +193,15 @@ export class SDKGeneratorService {
             },
             sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
             sdkVersion: (existingAggregator.sdkVersion || 0) + 1,
+            // Store credentials if provided
+            ...(request.credentials && {
+              credentials: {
+                baseUrl: request.credentials.baseUrl || parsedSpec.servers?.[0]?.url || '',
+                apiKey: request.credentials.apiKey,
+                bearerToken: request.credentials.bearerToken,
+                timeout: request.credentials.timeout,
+              },
+            }),
           },
         });
       } else {
@@ -217,6 +226,15 @@ export class SDKGeneratorService {
             sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
             sdkVersion: 1,
             isPublic: false,
+            // Store credentials if provided
+            ...(request.credentials && {
+              credentials: {
+                baseUrl: request.credentials.baseUrl || parsedSpec.servers?.[0]?.url || '',
+                apiKey: request.credentials.apiKey,
+                bearerToken: request.credentials.bearerToken,
+                timeout: request.credentials.timeout,
+              },
+            }),
           },
         });
       }
@@ -513,13 +531,32 @@ export default ${className};
 
     const systemPrompt = `You are an expert TypeScript developer. Generate a complete, production-ready SDK class from the provided OpenAPI specification.
 
-Requirements:
-1. Use modern TypeScript with proper types
-2. Include proper error handling
-3. Use fetch API for HTTP requests
-4. Include JSDoc comments
-5. Handle authentication properly
-6. Export all types and the main class
+CRITICAL REQUIREMENTS - Follow these exactly:
+1. CONSTRUCTOR: The class constructor MUST accept a config object: constructor(config: { baseUrl: string; apiKey?: string; bearerToken?: string })
+2. NO IMPORTS: Do NOT import any external types - define all types inline using 'type' or 'interface'
+3. USE CONFIG: Use config.baseUrl for the API URL, NOT a hardcoded URL
+4. AUTH: Use config.apiKey or config.bearerToken for authentication headers
+5. EXPORT: Export the main class and any helper types inline
+
+Example structure:
+export type MyResponse = { data: any; success: boolean };
+
+export class MySDK {
+  private baseUrl: string;
+  private headers: Record<string, string>;
+
+  constructor(config: { baseUrl: string; apiKey?: string; bearerToken?: string }) {
+    this.baseUrl = config.baseUrl;
+    this.headers = { 'Content-Type': 'application/json' };
+    if (config.apiKey) this.headers['X-API-Key'] = config.apiKey;
+    if (config.bearerToken) this.headers['Authorization'] = \`Bearer \${config.bearerToken}\`;
+  }
+
+  async getData(): Promise<MyResponse> {
+    const response = await fetch(\`\${this.baseUrl}/endpoint\`, { headers: this.headers });
+    return response.json();
+  }
+}
 
 The class should be named: ${className}`;
 

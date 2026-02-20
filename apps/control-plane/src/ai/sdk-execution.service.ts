@@ -95,6 +95,9 @@ export class SDKExecutionService {
    * 
    * This is the main entry point for using SDKs in workflow activities.
    * The SDK code is loaded from S3, compiled, and executed in a sandbox.
+   * 
+   * Credentials are retrieved from the aggregator's stored credentials (if any),
+   * but can be overridden by the config passed in the request.
    */
   async executeMethod(context: SDKExecutionContext): Promise<SDKExecutionResult> {
     const startTime = Date.now();
@@ -104,28 +107,48 @@ export class SDKExecutionService {
 
       this.logger.log(`Executing SDK method: ${aggregatorId}.${method}`);
 
-      // Step 1: Get SDK code (from cache or storage)
+      // Step 1: Get stored credentials from aggregator (if any)
+      const aggregator = await this.prisma.aggregator.findUnique({
+        where: { id: aggregatorId },
+      });
+
+      const storedCredentials = (aggregator?.credentials as SDKConfig) || {};
+
+      // Step 2: Merge credentials - provided config takes precedence over stored
+      const mergedConfig: SDKConfig = {
+        baseUrl: config?.baseUrl || storedCredentials.baseUrl,
+        apiKey: config?.apiKey || storedCredentials.apiKey,
+        bearerToken: config?.bearerToken || storedCredentials.bearerToken,
+        timeout: config?.timeout || storedCredentials.timeout || 30000,
+      };
+
+      // Validate that we have at least a baseUrl
+      if (!mergedConfig.baseUrl) {
+        throw new BadRequestException('No baseUrl provided. Either pass it in config or store it in the aggregator credentials.');
+      }
+
+      // Step 3: Get SDK code (from cache or storage)
       const sdkCode = await this.loadSDKCode(aggregatorId);
 
-      // Step 2: Compile the SDK (from cache or compile)
+      // Step 4: Compile the SDK (from cache or compile)
       const compiled = await this.compileSDK(aggregatorId, sdkCode);
 
       if (!compiled.jsCode) {
         throw new BadRequestException('Failed to compile SDK');
       }
 
-      // Step 3: Validate the code is safe
+      // Step 5: Validate the code is safe
       const validation = this.wasmCompiler.validateCode(compiled.jsCode);
       if (!validation.valid) {
         throw new BadRequestException(`SDK code validation failed: ${validation.errors?.join(', ')}`);
       }
 
-      // Step 4: Execute the method in sandbox
+      // Step 6: Execute the method in sandbox with merged credentials
       const result = await this.executeInSandbox(
         compiled.jsCode,
         method,
         params,
-        config
+        mergedConfig
       );
 
       const executionTimeMs = Date.now() - startTime;

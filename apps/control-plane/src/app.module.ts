@@ -14,6 +14,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { WebsocketModule } from './websocket/websocket.module';
 import { StorageModule } from './storage/storage.module';
 import { AIModule } from './ai/ai.module';
+import { MappingsModule } from './mappings/mappings.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { AIModule } from './ai/ai.module';
     WebsocketModule,
     StorageModule,
     AIModule,
+    MappingsModule,
   ],
   providers: [PrismaService, LoggingInterceptor],
   exports: [PrismaService],

@@ -1,7 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IsString, IsOptional, MinLength } from 'class-validator';
+import { IsString, IsOptional, MinLength, IsArray, ValidateNested, IsBoolean } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 
 /**
  * Supported AI providers
@@ -117,6 +118,41 @@ export interface AICompletionResponse {
 }
 
 /**
+ * SDK Credentials DTO
+ */
+export class SDKCredentialsDto {
+  @ApiProperty({ 
+    description: 'Base URL of the API',
+    example: 'https://api.example.com'
+  })
+  @IsString()
+  baseUrl!: string;
+
+  @ApiPropertyOptional({ 
+    description: 'API Key for authentication',
+    example: 'sk-xxxxx'
+  })
+  @IsOptional()
+  @IsString()
+  apiKey?: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Bearer token for OAuth/JWT authentication',
+    example: 'eyJhbGciOiJIUzI1NiIs...'
+  })
+  @IsOptional()
+  @IsString()
+  bearerToken?: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Request timeout in milliseconds',
+    example: 30000
+  })
+  @IsOptional()
+  timeout?: number;
+}
+
+/**
  * AI SDK Generation request DTO
  */
 export class GenerateSDKRequest {
@@ -150,6 +186,13 @@ export class GenerateSDKRequest {
   @IsOptional()
   @IsString()
   aggregatorId?: string;
+
+  @ApiPropertyOptional({ 
+    description: 'API credentials to store for this SDK (used when executing SDK methods)',
+    type: SDKCredentialsDto
+  })
+  @IsOptional()
+  credentials?: SDKCredentialsDto;
 }
 
 /**
@@ -207,30 +250,64 @@ export class GenerateWorkflowRequest {
 }
 
 /**
- * AI Schema Mapping request
+ * Schema column DTO for mapping requests
  */
-export interface GenerateSchemaMappingRequest {
-  /** Source schema */
-  sourceSchema: {
-    tableName: string;
-    columns: Array<{
-      name: string;
-      type: string;
-      nullable?: boolean;
-    }>;
-  };
-  /** Destination schema */
-  destinationSchema: {
-    tableName: string;
-    columns: Array<{
-      name: string;
-      type: string;
-      nullable?: boolean;
-    }>;
-  };
-  /** Optional description of transformation */
+export class SchemaColumnDto {
+  @ApiProperty({ description: 'Column name', example: 'user_id' })
+  @IsString()
+  name!: string;
+
+  @ApiProperty({ description: 'Column data type', example: 'varchar(255)' })
+  @IsString()
+  type!: string;
+
+  @ApiPropertyOptional({ description: 'Whether column is nullable', example: false })
+  @IsOptional()
+  @IsBoolean()
+  nullable?: boolean;
+}
+
+/**
+ * Table schema DTO for mapping requests
+ */
+export class TableSchemaDto {
+  @ApiProperty({ description: 'Table name', example: 'users' })
+  @IsString()
+  tableName!: string;
+
+  @ApiProperty({ 
+    description: 'Table columns', 
+    type: [SchemaColumnDto],
+    example: [{ name: 'id', type: 'int' }, { name: 'name', type: 'varchar(255)' }]
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SchemaColumnDto)
+  columns!: SchemaColumnDto[];
+}
+
+/**
+ * AI Schema Mapping request DTO
+ */
+export class GenerateSchemaMappingRequest {
+  @ApiProperty({ description: 'Source schema', type: TableSchemaDto })
+  @ValidateNested()
+  @Type(() => TableSchemaDto)
+  sourceSchema!: TableSchemaDto;
+
+  @ApiProperty({ description: 'Destination schema', type: TableSchemaDto })
+  @ValidateNested()
+  @Type(() => TableSchemaDto)
+  destinationSchema!: TableSchemaDto;
+
+  @ApiPropertyOptional({ description: 'Optional description of transformation' })
+  @IsOptional()
+  @IsString()
   description?: string;
-  /** Custom model to use */
+
+  @ApiPropertyOptional({ description: 'Custom model to use', example: 'openai/gpt-4o-mini' })
+  @IsOptional()
+  @IsString()
   model?: string;
 }
 

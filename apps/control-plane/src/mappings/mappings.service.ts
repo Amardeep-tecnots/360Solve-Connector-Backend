@@ -1,0 +1,1067 @@
+import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma.service';
+import { AIProviderService } from '../ai/ai-provider.service';
+import {
+  CreateMappingDto,
+  UpdateMappingDto,
+  MappingQueryDto,
+  MappingTypeDto,
+  SourceTypeDto,
+} from './dto/create-mapping.dto';
+import {
+  GenerateMappingDto,
+  QuickGenerateMappingDto,
+  ApplyMappingDto,
+  ValidateMappingDto,
+} from './dto/generate-mapping.dto';
+
+/**
+ * Mapping rule structure
+ */
+export interface MappingRule {
+  sourceField: string;
+  destinationField: string;
+  transform?: string;
+  transformConfig?: Record<string, any>;
+  nullable?: boolean;
+  dataType?: string;
+  defaultValue?: any;
+}
+
+/**
+ * AI-generated mapping result
+ */
+export interface GeneratedMappingResult {
+  mappingRules: MappingRule[];
+  recommendations: string[];
+  transformCode?: string;
+}
+
+/**
+ * Schema table column definition
+ */
+interface SchemaColumn {
+  name: string;
+  type: string;
+  nullable?: boolean;
+  primaryKey?: boolean;
+}
+
+/**
+ * Schema table definition
+ */
+interface SchemaTable {
+  name: string;
+  columns: SchemaColumn[];
+}
+
+/**
+ * Discovered schema structure
+ */
+interface DiscoveredSchema {
+  tables?: SchemaTable[];
+  [key: string]: any;
+}
+
+@Injectable()
+export class MappingsService {
+  private readonly logger = new Logger(MappingsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aiProvider: AIProviderService,
+  ) {}
+
+  // ============================================
+  // CRUD Operations
+  // ============================================
+
+  /**
+   * Create a new field mapping
+   */
+  async create(tenantId: string, dto: CreateMappingDto) {
+    // Check for duplicate name
+    const existing = await this.prisma.fieldMapping.findFirst({
+      where: { tenantId, name: dto.name },
+    });
+
+    if (existing) {
+      throw new ConflictException(`Mapping with name "${dto.name}" already exists`);
+    }
+
+    // Validate instances if provided
+    if (dto.sourceInstanceId) {
+      await this.validateInstance(dto.sourceInstanceId, tenantId, 'source');
+    }
+    if (dto.destinationInstanceId) {
+      await this.validateInstance(dto.destinationInstanceId, tenantId, 'destination');
+    }
+
+    // Determine mapping type if not provided
+    const type = dto.type || this.determineMappingType(dto.sourceType, dto.destinationType);
+
+    const mapping = await this.prisma.fieldMapping.create({
+      data: {
+        tenantId,
+        name: dto.name,
+        description: dto.description,
+        type: type as any,
+        sourceInstanceId: dto.sourceInstanceId,
+        sourceType: dto.sourceType,
+        sourceConnectorId: dto.sourceConnectorId,
+        sourceName: dto.sourceName,
+        sourceSchema: dto.sourceSchema,
+        destinationInstanceId: dto.destinationInstanceId,
+        destinationType: dto.destinationType,
+        destinationConnectorId: dto.destinationConnectorId,
+        destinationName: dto.destinationName,
+        destinationSchema: dto.destinationSchema,
+        mappingRules: dto.mappingRules as any,
+        transformCode: dto.transformCode,
+        isActive: dto.isActive ?? true,
+      },
+      include: {
+        sourceInstance: {
+          select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+        },
+        destinationInstance: {
+          select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+        },
+      },
+    });
+
+    return this.formatMapping(mapping);
+  }
+
+  /**
+   * Find all mappings with filtering
+   */
+  async findAll(tenantId: string, query: MappingQueryDto) {
+    const { page = 1, limit = 20, ...filters } = query;
+
+    const where: any = { tenantId };
+
+    if (filters.sourceInstanceId) {
+      where.sourceInstanceId = filters.sourceInstanceId;
+    }
+    if (filters.destinationInstanceId) {
+      where.destinationInstanceId = filters.destinationInstanceId;
+    }
+    if (filters.type) {
+      where.type = filters.type;
+    }
+    if (filters.sourceType) {
+      where.sourceType = filters.sourceType;
+    }
+    if (filters.destinationType) {
+      where.destinationType = filters.destinationType;
+    }
+    if (filters.isActive !== undefined) {
+      where.isActive = filters.isActive;
+    }
+    if (filters.search) {
+      where.OR = [
+        { name: { contains: filters.search, mode: 'insensitive' } },
+        { description: { contains: filters.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [mappings, total] = await Promise.all([
+      this.prisma.fieldMapping.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          sourceInstance: {
+            select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+          },
+          destinationInstance: {
+            select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+          },
+        },
+      }),
+      this.prisma.fieldMapping.count({ where }),
+    ]);
+
+    return {
+      data: mappings.map((m) => this.formatMapping(m)),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * Find one mapping by ID
+   */
+  async findOne(id: string, tenantId: string) {
+    const mapping = await this.prisma.fieldMapping.findFirst({
+      where: { id, tenantId },
+      include: {
+        sourceInstance: {
+          select: {
+            id: true,
+            name: true,
+            aggregator: { select: { id: true, name: true, category: true, type: true } },
+          },
+        },
+        destinationInstance: {
+          select: {
+            id: true,
+            name: true,
+            aggregator: { select: { id: true, name: true, category: true, type: true } },
+          },
+        },
+      },
+    });
+
+    if (!mapping) {
+      throw new NotFoundException(`Mapping with ID "${id}" not found`);
+    }
+
+    return this.formatMapping(mapping);
+  }
+
+  /**
+   * Update a mapping
+   */
+  async update(id: string, tenantId: string, dto: UpdateMappingDto) {
+    // Check existence
+    const existing = await this.prisma.fieldMapping.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Mapping with ID "${id}" not found`);
+    }
+
+    // Check for duplicate name if changing
+    if (dto.name && dto.name !== existing.name) {
+      const duplicate = await this.prisma.fieldMapping.findFirst({
+        where: { tenantId, name: dto.name, id: { not: id } },
+      });
+      if (duplicate) {
+        throw new ConflictException(`Mapping with name "${dto.name}" already exists`);
+      }
+    }
+
+    // Validate instances if changing
+    if (dto.sourceInstanceId && dto.sourceInstanceId !== existing.sourceInstanceId) {
+      await this.validateInstance(dto.sourceInstanceId, tenantId, 'source');
+    }
+    if (dto.destinationInstanceId && dto.destinationInstanceId !== existing.destinationInstanceId) {
+      await this.validateInstance(dto.destinationInstanceId, tenantId, 'destination');
+    }
+
+    // Build update data
+    const updateData: any = {};
+    if (dto.name !== undefined) updateData.name = dto.name;
+    if (dto.description !== undefined) updateData.description = dto.description;
+    if (dto.type !== undefined) updateData.type = dto.type;
+    if (dto.sourceInstanceId !== undefined) updateData.sourceInstanceId = dto.sourceInstanceId;
+    if (dto.sourceType !== undefined) updateData.sourceType = dto.sourceType;
+    if (dto.sourceConnectorId !== undefined) updateData.sourceConnectorId = dto.sourceConnectorId;
+    if (dto.sourceName !== undefined) updateData.sourceName = dto.sourceName;
+    if (dto.sourceSchema !== undefined) updateData.sourceSchema = dto.sourceSchema;
+    if (dto.destinationInstanceId !== undefined) updateData.destinationInstanceId = dto.destinationInstanceId;
+    if (dto.destinationType !== undefined) updateData.destinationType = dto.destinationType;
+    if (dto.destinationConnectorId !== undefined) updateData.destinationConnectorId = dto.destinationConnectorId;
+    if (dto.destinationName !== undefined) updateData.destinationName = dto.destinationName;
+    if (dto.destinationSchema !== undefined) updateData.destinationSchema = dto.destinationSchema;
+    if (dto.mappingRules !== undefined) updateData.mappingRules = dto.mappingRules;
+    if (dto.transformCode !== undefined) updateData.transformCode = dto.transformCode;
+    if (dto.isActive !== undefined) updateData.isActive = dto.isActive;
+
+    // Increment version if mapping rules change
+    if (dto.mappingRules !== undefined) {
+      updateData.version = existing.version + 1;
+      updateData.isValidated = false;
+      updateData.validationErrors = null;
+    }
+
+    const updated = await this.prisma.fieldMapping.update({
+      where: { id },
+      data: updateData,
+      include: {
+        sourceInstance: {
+          select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+        },
+        destinationInstance: {
+          select: { id: true, name: true, aggregator: { select: { id: true, name: true, category: true } } },
+        },
+      },
+    });
+
+    return this.formatMapping(updated);
+  }
+
+  /**
+   * Delete a mapping
+   */
+  async delete(id: string, tenantId: string) {
+    const existing = await this.prisma.fieldMapping.findFirst({
+      where: { id, tenantId },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Mapping with ID "${id}" not found`);
+    }
+
+    await this.prisma.fieldMapping.delete({
+      where: { id },
+    });
+
+    return { success: true };
+  }
+
+  // ============================================
+  // AI Mapping Generation
+  // ============================================
+
+  /**
+   * Generate mapping using AI
+   */
+  async generateMapping(tenantId: string, dto: GenerateMappingDto): Promise<{
+    success: boolean;
+    mapping?: any;
+    generatedRules?: MappingRule[];
+    recommendations?: string[];
+    transformCode?: string;
+    errors?: string[];
+  }> {
+    try {
+      this.logger.log(`Generating mapping: ${dto.source.type} -> ${dto.destination.type}`);
+
+      // Build context for AI
+      const sourceContext = await this.buildSchemaContext(dto.source, tenantId);
+      const destContext = await this.buildSchemaContext(dto.destination, tenantId);
+
+      // Generate mapping using AI
+      const generated = await this.generateAIMapping(
+        sourceContext,
+        destContext,
+        dto.mappingHint,
+        dto.model
+      );
+
+      if (!generated) {
+        return {
+          success: false,
+          errors: ['Failed to generate mapping'],
+        };
+      }
+
+      // Save mapping if requested
+      if (dto.saveMapping) {
+        const mappingName = dto.name || `${dto.source.name}_to_${dto.destination.name}_${Date.now()}`;
+        const mappingType = this.determineMappingType(dto.source.type, dto.destination.type);
+
+        const mapping = await this.prisma.fieldMapping.create({
+          data: {
+            tenantId,
+            name: mappingName,
+            description: dto.description,
+            type: mappingType as any,
+            sourceInstanceId: dto.source.instanceId,
+            sourceType: dto.source.type,
+            sourceConnectorId: dto.source.connectorId,
+            sourceName: dto.source.name,
+            sourceSchema: sourceContext.schema,
+            destinationInstanceId: dto.destination.instanceId,
+            destinationType: dto.destination.type,
+            destinationConnectorId: dto.destination.connectorId,
+            destinationName: dto.destination.name,
+            destinationSchema: destContext.schema,
+            mappingRules: generated.mappingRules as any,
+            transformCode: generated.transformCode,
+            isGenerated: true,
+            isActive: true,
+          },
+        });
+
+        return {
+          success: true,
+          mapping: this.formatMapping(mapping),
+          generatedRules: generated.mappingRules,
+          recommendations: generated.recommendations,
+          transformCode: generated.transformCode,
+        };
+      }
+
+      return {
+        success: true,
+        generatedRules: generated.mappingRules,
+        recommendations: generated.recommendations,
+        transformCode: generated.transformCode,
+      };
+
+    } catch (error: any) {
+      this.logger.error(`Mapping generation failed: ${error.message}`, error.stack);
+      return {
+        success: false,
+        errors: [error.message],
+      };
+    }
+  }
+
+  /**
+   * Quick generate mapping from existing instances
+   */
+  async quickGenerateMapping(tenantId: string, dto: QuickGenerateMappingDto) {
+    // Get source instance
+    const sourceInstance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: dto.sourceInstanceId, tenantId },
+      include: {
+        aggregator: { select: { id: true, name: true, category: true, type: true } },
+        connector: { select: { id: true, name: true, type: true } },
+      },
+    });
+
+    if (!sourceInstance) {
+      throw new NotFoundException(`Source instance "${dto.sourceInstanceId}" not found`);
+    }
+
+    // Get destination instance
+    const destInstance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: dto.destinationInstanceId, tenantId },
+      include: {
+        aggregator: { select: { id: true, name: true, category: true, type: true } },
+        connector: { select: { id: true, name: true, type: true } },
+      },
+    });
+
+    if (!destInstance) {
+      throw new NotFoundException(`Destination instance "${dto.destinationInstanceId}" not found`);
+    }
+
+    // Determine source/destination types
+    const sourceType = sourceInstance.connector?.type === 'MINI' 
+      ? SourceTypeDto.MINI_CONNECTOR 
+      : this.getTypeFromCategory(sourceInstance.aggregator.category);
+    
+    const destType = destInstance.connector?.type === 'MINI'
+      ? SourceTypeDto.MINI_CONNECTOR
+      : this.getTypeFromCategory(destInstance.aggregator.category);
+
+    // Get schemas from discovered schema or use provided names
+    const sourceSchema = (sourceInstance.discoveredSchema as DiscoveredSchema) || {};
+    const destSchema = (destInstance.discoveredSchema as DiscoveredSchema) || {};
+
+    // If source/destination names provided, extract specific table/object schema
+    let sourceFields: SchemaColumn[] = [];
+    let destFields: SchemaColumn[] = [];
+
+    if (dto.sourceName && sourceSchema.tables) {
+      const table = sourceSchema.tables.find((t) => t.name === dto.sourceName);
+      if (table) {
+        sourceFields = table.columns || [];
+      }
+    } else if (sourceSchema.tables && sourceSchema.tables.length > 0) {
+      // Use first table as default
+      sourceFields = sourceSchema.tables[0].columns || [];
+    }
+
+    if (dto.destinationName && destSchema.tables) {
+      const table = destSchema.tables.find((t) => t.name === dto.destinationName);
+      if (table) {
+        destFields = table.columns || [];
+      }
+    } else if (destSchema.tables && destSchema.tables.length > 0) {
+      destFields = destSchema.tables[0].columns || [];
+    }
+
+    // Generate mapping
+    const generateDto: GenerateMappingDto = {
+      name: dto.name,
+      description: dto.description,
+      source: {
+        instanceId: dto.sourceInstanceId,
+        type: sourceType,
+        connectorId: sourceInstance.connectorId || undefined,
+        name: dto.sourceName || (sourceSchema.tables?.[0]?.name || 'unknown'),
+        fields: sourceFields.map((f) => ({
+          name: f.name,
+          type: f.type,
+          nullable: f.nullable,
+        })),
+      },
+      destination: {
+        instanceId: dto.destinationInstanceId,
+        type: destType,
+        connectorId: destInstance.connectorId || undefined,
+        name: dto.destinationName || (destSchema.tables?.[0]?.name || 'unknown'),
+        fields: destFields.map((f) => ({
+          name: f.name,
+          type: f.type,
+          nullable: f.nullable,
+        })),
+      },
+      mappingHint: dto.mappingHint,
+      saveMapping: dto.saveMapping ?? true,
+    };
+
+    return this.generateMapping(tenantId, generateDto);
+  }
+
+  // ============================================
+  // Apply Mapping
+  // ============================================
+
+  /**
+   * Apply mapping to data
+   */
+  async applyMapping(dto: ApplyMappingDto): Promise<{
+    success: boolean;
+    data?: Record<string, any> | Record<string, any>[];
+    errors?: string[];
+  }> {
+    const mapping = await this.prisma.fieldMapping.findUnique({
+      where: { id: dto.mappingId },
+    });
+
+    if (!mapping) {
+      throw new NotFoundException(`Mapping "${dto.mappingId}" not found`);
+    }
+
+    try {
+      const rules = mapping.mappingRules as unknown as MappingRule[];
+      const inputData = Array.isArray(dto.data) ? dto.data : [dto.data];
+      const outputData: Record<string, any>[] = [];
+
+      for (const row of inputData) {
+        const mappedRow: Record<string, any> = {};
+
+        for (const rule of rules) {
+          // Skip if fields filter is provided and this field is not included
+          if (dto.fields && !dto.fields.includes(rule.destinationField)) {
+            continue;
+          }
+
+          // Get source value (support nested paths)
+          const sourceValue = this.getNestedValue(row, rule.sourceField);
+          
+          // Apply transformation
+          let value = this.applyTransformation(sourceValue, rule);
+
+          // Handle null values
+          if (value === null || value === undefined) {
+            if (rule.defaultValue !== undefined) {
+              value = rule.defaultValue;
+            } else if (!rule.nullable) {
+              value = null; // Will cause validation error if destination is not nullable
+            }
+          }
+
+          // Set destination value (support nested paths)
+          this.setNestedValue(mappedRow, rule.destinationField, value);
+        }
+
+        outputData.push(mappedRow);
+      }
+
+      // Update last used at
+      await this.prisma.fieldMapping.update({
+        where: { id: dto.mappingId },
+        data: { lastUsedAt: new Date() },
+      });
+
+      return {
+        success: true,
+        data: Array.isArray(dto.data) ? outputData : outputData[0],
+      };
+
+    } catch (error: any) {
+      this.logger.error(`Apply mapping failed: ${error.message}`, error.stack);
+      return {
+        success: false,
+        errors: [error.message],
+      };
+    }
+  }
+
+  /**
+   * Validate mapping
+   */
+  async validateMapping(tenantId: string, dto: ValidateMappingDto): Promise<{
+    valid: boolean;
+    errors: Array<{ field: string; message: string }>;
+    warnings: Array<{ field: string; message: string }>;
+  }> {
+    const errors: Array<{ field: string; message: string }> = [];
+    const warnings: Array<{ field: string; message: string }> = [];
+
+    let mapping: any = null;
+    let sourceSchema: any = dto.sourceSchema;
+    let destSchema: any = dto.destinationSchema;
+    let rules: MappingRule[] = (dto.mappingRules as MappingRule[]) || [];
+
+    // Get existing mapping if ID provided
+    if (dto.mappingId) {
+      mapping = await this.prisma.fieldMapping.findFirst({
+        where: { id: dto.mappingId, tenantId },
+      });
+
+      if (!mapping) {
+        throw new NotFoundException(`Mapping "${dto.mappingId}" not found`);
+      }
+
+      sourceSchema = sourceSchema || mapping.sourceSchema;
+      destSchema = destSchema || mapping.destinationSchema;
+      rules = rules.length > 0 ? rules : (mapping.mappingRules as MappingRule[]);
+    }
+
+    // Extract field names from schemas
+    const sourceFields = this.extractFieldNames(sourceSchema);
+    const destFields = this.extractFieldNames(destSchema);
+
+    // Validate each rule
+    for (const rule of rules) {
+      // Check source field exists
+      if (!sourceFields.includes(rule.sourceField) && !rule.sourceField.includes('.')) {
+        warnings.push({
+          field: rule.sourceField,
+          message: `Source field "${rule.sourceField}" not found in schema`,
+        });
+      }
+
+      // Check destination field exists
+      if (!destFields.includes(rule.destinationField) && !rule.destinationField.includes('.')) {
+        warnings.push({
+          field: rule.destinationField,
+          message: `Destination field "${rule.destinationField}" not found in schema`,
+        });
+      }
+
+      // Validate transformation
+      if (rule.transform && !this.isValidTransformation(rule.transform)) {
+        errors.push({
+          field: rule.destinationField,
+          message: `Invalid transformation type "${rule.transform}"`,
+        });
+      }
+    }
+
+    // Check for unmapped destination fields
+    const mappedDestFields = rules.map((r) => r.destinationField);
+    for (const field of destFields) {
+      if (!mappedDestFields.includes(field)) {
+        warnings.push({
+          field,
+          message: `Destination field "${field}" is not mapped`,
+        });
+      }
+    }
+
+    // Test with sample data if provided
+    if (dto.sampleData) {
+      try {
+        const testResult = await this.testMappingWithData(rules, dto.sampleData);
+        if (!testResult.success) {
+          errors.push(...testResult.errors.map((e) => ({ field: '', message: e })));
+        }
+      } catch (error: any) {
+        errors.push({
+          field: '',
+          message: `Sample data test failed: ${error.message}`,
+        });
+      }
+    }
+
+    // Update validation status if mapping exists
+    if (mapping) {
+      await this.prisma.fieldMapping.update({
+        where: { id: mapping.id },
+        data: {
+          isValidated: errors.length === 0,
+          validationErrors: errors.length > 0 ? errors : null,
+        },
+      });
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+    };
+  }
+
+  // ============================================
+  // Private Helper Methods
+  // ============================================
+
+  private async validateInstance(instanceId: string, tenantId: string, type: 'source' | 'destination') {
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: instanceId, tenantId },
+    });
+
+    if (!instance) {
+      throw new NotFoundException(`${type} instance "${instanceId}" not found`);
+    }
+
+    return instance;
+  }
+
+  private determineMappingType(sourceType: string, destType: string): MappingTypeDto {
+    if (sourceType === SourceTypeDto.MINI_CONNECTOR || destType === SourceTypeDto.MINI_CONNECTOR) {
+      return MappingTypeDto.MINI_CONNECTOR;
+    }
+    if (sourceType === SourceTypeDto.SDK || destType === SourceTypeDto.SDK) {
+      return MappingTypeDto.FIELD;
+    }
+    if (sourceType === SourceTypeDto.AGGREGATOR || destType === SourceTypeDto.AGGREGATOR) {
+      return MappingTypeDto.AGGREGATOR;
+    }
+    return MappingTypeDto.COLUMN;
+  }
+
+  private getTypeFromCategory(category: string): SourceTypeDto {
+    const categoryLower = category.toLowerCase();
+    if (categoryLower.includes('database')) return SourceTypeDto.DATABASE;
+    if (categoryLower.includes('crm') || categoryLower.includes('erp')) return SourceTypeDto.AGGREGATOR;
+    if (categoryLower.includes('api') || categoryLower.includes('sdk')) return SourceTypeDto.SDK;
+    return SourceTypeDto.AGGREGATOR;
+  }
+
+  private formatMapping(mapping: any) {
+    return {
+      id: mapping.id,
+      name: mapping.name,
+      description: mapping.description,
+      type: mapping.type,
+      version: mapping.version,
+      isActive: mapping.isActive,
+      isGenerated: mapping.isGenerated,
+      isValidated: mapping.isValidated,
+      validationErrors: mapping.validationErrors,
+      // Source
+      sourceInstanceId: mapping.sourceInstanceId,
+      sourceInstance: mapping.sourceInstance,
+      sourceType: mapping.sourceType,
+      sourceConnectorId: mapping.sourceConnectorId,
+      sourceName: mapping.sourceName,
+      sourceSchema: mapping.sourceSchema,
+      // Destination
+      destinationInstanceId: mapping.destinationInstanceId,
+      destinationInstance: mapping.destinationInstance,
+      destinationType: mapping.destinationType,
+      destinationConnectorId: mapping.destinationConnectorId,
+      destinationName: mapping.destinationName,
+      destinationSchema: mapping.destinationSchema,
+      // Rules
+      mappingRules: mapping.mappingRules,
+      transformCode: mapping.transformCode,
+      // Metadata
+      lastUsedAt: mapping.lastUsedAt,
+      createdAt: mapping.createdAt,
+      updatedAt: mapping.updatedAt,
+    };
+  }
+
+  private async buildSchemaContext(config: any, tenantId: string): Promise<{
+    type: string;
+    name: string;
+    schema: Record<string, any>;
+    description?: string;
+  }> {
+    let schema = config.schema || {};
+    let name = config.name;
+
+    // If instance ID provided, get additional context
+    if (config.instanceId) {
+      const instance = await this.prisma.aggregatorInstance.findFirst({
+        where: { id: config.instanceId, tenantId },
+        include: {
+          aggregator: { select: { id: true, name: true, category: true } },
+        },
+      });
+
+      if (instance) {
+        // Use discovered schema if available
+        if (instance.discoveredSchema && !config.fields?.length) {
+          schema = instance.discoveredSchema;
+        }
+
+        // Add aggregator context
+        schema.aggregatorName = instance.aggregator.name;
+        schema.aggregatorCategory = instance.aggregator.category;
+      }
+    }
+
+    // Use provided fields if available
+    if (config.fields && config.fields.length > 0) {
+      schema.fields = config.fields;
+    }
+
+    return {
+      type: config.type,
+      name,
+      schema,
+      description: config.description,
+    };
+  }
+
+  private async generateAIMapping(
+    sourceContext: any,
+    destContext: any,
+    hint?: string,
+    model?: string
+  ): Promise<GeneratedMappingResult | null> {
+    // Build system prompt based on source and destination types
+    const systemPrompt = this.buildSystemPrompt(sourceContext.type, destContext.type);
+
+    // Build user prompt with schema details
+    const userPrompt = this.buildUserPrompt(sourceContext, destContext, hint);
+
+    try {
+      const response = await this.aiProvider.completeText(
+        userPrompt,
+        systemPrompt,
+        {
+          model: model || 'openai/gpt-4o-mini',
+          temperature: 0.3,
+          maxTokens: 4000,
+        }
+      );
+
+      // Parse response
+      const cleanedResponse = this.cleanJsonResponse(response);
+      const result = JSON.parse(cleanedResponse);
+
+      return {
+        mappingRules: result.mappings || result.mappingRules || [],
+        recommendations: result.recommendations || [],
+        transformCode: result.transformCode,
+      };
+
+    } catch (error: any) {
+      this.logger.error(`AI mapping generation failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  private buildSystemPrompt(sourceType: string, destType: string): string {
+    const typeDescriptions: Record<string, string> = {
+      database: 'a relational database table with columns',
+      sdk: 'an API endpoint with request/response fields (may have nested objects)',
+      aggregator: 'an aggregator object (e.g., Salesforce object, HubSpot properties)',
+      'mini-connector': 'a local data source accessed via mini connector',
+    };
+
+    return `You are an expert in data mapping and transformation.
+Generate field-level mappings between ${typeDescriptions[sourceType] || sourceType} and ${typeDescriptions[destType] || destType}.
+
+Consider:
+1. Field name similarities (exact match, case-insensitive, snake_case to camelCase)
+2. Data type compatibility and conversion needs
+3. Required vs optional fields
+4. Nested object flattening for APIs
+5. Array handling
+6. Date/time format conversions
+
+Available transformations:
+- direct: No transformation
+- uppercase/lowercase: String case conversion
+- date-format: Date formatting (use transformConfig.format)
+- number-format: Number formatting (use transformConfig.format)
+- string-to-number: Convert string to number
+- number-to-string: Convert number to string
+- boolean-to-string: Convert boolean to string
+- json-stringify: Convert object to JSON string
+- json-parse: Parse JSON string to object
+- custom: Use transformCode for custom transformation
+
+Respond with JSON only:
+{
+  "mappings": [
+    {
+      "sourceField": "field_name",
+      "destinationField": "FieldName",
+      "transform": "direct",
+      "transformConfig": {},
+      "nullable": true,
+      "dataType": "string",
+      "defaultValue": null
+    }
+  ],
+  "recommendations": ["List any recommendations or warnings"],
+  "transformCode": "// Optional: custom JavaScript transformation code"
+}`;
+  }
+
+  private buildUserPrompt(source: any, dest: any, hint?: string): string {
+    const sourceFields = this.formatFieldsForPrompt(source.schema?.fields || source.schema?.columns || []);
+    const destFields = this.formatFieldsForPrompt(dest.schema?.fields || dest.schema?.columns || []);
+
+    return `Generate field mappings:
+
+SOURCE: ${source.name} (${source.type})
+${sourceFields}
+${source.description ? `Description: ${source.description}` : ''}
+
+DESTINATION: ${dest.name} (${dest.type})
+${destFields}
+${dest.description ? `Description: ${dest.description}` : ''}
+
+${hint ? `Mapping Hint: ${hint}` : ''}
+
+Generate the optimal field mappings. Respond with JSON only.`;
+  }
+
+  private formatFieldsForPrompt(fields: any[]): string {
+    if (!fields || fields.length === 0) return 'No fields defined';
+
+    return fields
+      .map((f) => {
+        let line = `- ${f.name} (${f.type})`;
+        if (f.nullable) line += ' (nullable)';
+        if (f.primaryKey) line += ' (PK)';
+        if (f.description) line += ` - ${f.description}`;
+        if (f.nested && f.nested.length > 0) {
+          line += `\n  Nested: ${f.nested.map((n: any) => n.name).join(', ')}`;
+        }
+        return line;
+      })
+      .join('\n');
+  }
+
+  private cleanJsonResponse(response: string): string {
+    let cleaned = response.trim();
+
+    // Remove markdown code blocks
+    if (cleaned.startsWith('```')) {
+      const firstNewline = cleaned.indexOf('\n');
+      cleaned = cleaned.slice(firstNewline + 1);
+    }
+    if (cleaned.endsWith('```')) {
+      cleaned = cleaned.slice(0, -3);
+    }
+
+    return cleaned.trim();
+  }
+
+  private getNestedValue(obj: any, path: string): any {
+    return path.split('.').reduce((current, key) => {
+      return current && current[key] !== undefined ? current[key] : undefined;
+    }, obj);
+  }
+
+  private setNestedValue(obj: any, path: string, value: any): void {
+    const keys = path.split('.');
+    const lastKey = keys.pop()!;
+
+    const target = keys.reduce((current, key) => {
+      if (!current[key]) {
+        current[key] = {};
+      }
+      return current[key];
+    }, obj);
+
+    target[lastKey] = value;
+  }
+
+  private applyTransformation(value: any, rule: MappingRule): any {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    switch (rule.transform) {
+      case 'uppercase':
+        return String(value).toUpperCase();
+      case 'lowercase':
+        return String(value).toLowerCase();
+      case 'string-to-number':
+        return Number(value);
+      case 'number-to-string':
+        return String(value);
+      case 'boolean-to-string':
+        return String(value);
+      case 'json-stringify':
+        return JSON.stringify(value);
+      case 'json-parse':
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      case 'date-format':
+        try {
+          const date = new Date(value);
+          const format = rule.transformConfig?.format || 'ISO';
+          if (format === 'ISO') return date.toISOString();
+          return date.toLocaleDateString();
+        } catch {
+          return value;
+        }
+      case 'number-format':
+        try {
+          const format = rule.transformConfig?.format || '0.00';
+          return Number(value).toFixed(format.split('.')[1]?.length || 0);
+        } catch {
+          return value;
+        }
+      case 'direct':
+      default:
+        return value;
+    }
+  }
+
+  private isValidTransformation(transform: string): boolean {
+    const validTransforms = [
+      'direct', 'uppercase', 'lowercase', 'date-format', 'number-format',
+      'string-to-number', 'number-to-string', 'boolean-to-string',
+      'json-stringify', 'json-parse', 'custom',
+    ];
+    return validTransforms.includes(transform);
+  }
+
+  private extractFieldNames(schema: any): string[] {
+    if (!schema) return [];
+
+    // Handle different schema formats
+    if (schema.fields) {
+      return schema.fields.map((f: any) => f.name);
+    }
+    if (schema.columns) {
+      return schema.columns.map((c: any) => c.name);
+    }
+    if (Array.isArray(schema)) {
+      return schema.map((f: any) => f.name);
+    }
+
+    return [];
+  }
+
+  private async testMappingWithData(rules: MappingRule[], data: any): Promise<{
+    success: boolean;
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+
+    try {
+      for (const rule of rules) {
+        const value = this.getNestedValue(data, rule.sourceField);
+        const transformed = this.applyTransformation(value, rule);
+
+        // Check for required field violations
+        if (!rule.nullable && (transformed === null || transformed === undefined)) {
+          errors.push(`Required field "${rule.destinationField}" has no value`);
+        }
+      }
+
+      return {
+        success: errors.length === 0,
+        errors,
+      };
+
+    } catch (error: any) {
+      return {
+        success: false,
+        errors: [error.message],
+      };
+    }
+  }
+}

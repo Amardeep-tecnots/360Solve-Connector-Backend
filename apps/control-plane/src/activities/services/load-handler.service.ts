@@ -12,6 +12,12 @@ interface LoadConfig {
   conflictKey?: string | string[];
   conflictResolution?: 'replace' | 'merge' | 'skip';
   columnMappings?: { source: string; destination: string }[];
+  /**
+   * Mapping ID to use for field transformations.
+   * If provided, the mapping will be loaded from the field_mappings table
+   * and applied to transform the data before loading.
+   */
+  mappingId?: string;
   batchSize?: number;
   /** 
    * Source metadata from previous activity to infer table name.
@@ -78,8 +84,14 @@ export class LoadHandlerService extends BaseActivityHandler {
         table: resolvedTableName,
       };
 
-      // Apply column mappings if provided
-      const dataToLoad = this.applyColumnMappings(inputData, config.columnMappings);
+      // Apply stored mapping if mappingId is provided
+      let mappedData = inputData;
+      if (config.mappingId) {
+        mappedData = await this.applyStoredMapping(inputData, config.mappingId, context.tenantId);
+      }
+
+      // Apply column mappings if provided (takes precedence over stored mapping)
+      const dataToLoad = this.applyColumnMappings(mappedData, config.columnMappings);
 
       // Load data in batches
       const batchSize = config.batchSize || 1000;
@@ -205,6 +217,152 @@ export class LoadHandlerService extends BaseActivityHandler {
   private isRetryableError(error: any): boolean {
     const retryableCodes = ['NETWORK_ERROR', 'TIMEOUT', 'DEADLOCK'];
     return retryableCodes.some(code => error.code === code);
+  }
+
+  /**
+   * Apply a stored field mapping to transform data
+   */
+  private async applyStoredMapping(
+    data: any[],
+    mappingId: string,
+    tenantId: string
+  ): Promise<any[]> {
+    // Load the mapping from database
+    const mapping = await this.prisma.fieldMapping.findFirst({
+      where: {
+        id: mappingId,
+        tenantId,
+        isActive: true,
+      },
+    });
+
+    if (!mapping) {
+      this.logger.warn(`Mapping "${mappingId}" not found or inactive, skipping mapping`);
+      return data;
+    }
+
+    const rules = mapping.mappingRules as Array<{
+      sourceField: string;
+      destinationField: string;
+      transform?: string;
+      transformConfig?: Record<string, any>;
+      nullable?: boolean;
+      defaultValue?: any;
+    }>;
+
+    if (!rules || rules.length === 0) {
+      this.logger.warn(`Mapping "${mappingId}" has no rules, skipping mapping`);
+      return data;
+    }
+
+    // Apply mapping rules to each row
+    const mappedData = data.map((row) => {
+      const mappedRow: any = {};
+
+      for (const rule of rules) {
+        // Get source value (support nested paths)
+        const sourceValue = this.getNestedValue(row, rule.sourceField);
+
+        // Apply transformation
+        let value = this.applyTransformation(sourceValue, rule);
+
+        // Handle null values
+        if (value === null || value === undefined) {
+          if (rule.defaultValue !== undefined) {
+            value = rule.defaultValue;
+          }
+        }
+
+        // Set destination value (support nested paths)
+        this.setNestedValue(mappedRow, rule.destinationField, value);
+      }
+
+      return mappedRow;
+    });
+
+    // Update last used timestamp
+    await this.prisma.fieldMapping.update({
+      where: { id: mappingId },
+      data: { lastUsedAt: new Date() },
+    });
+
+    this.logger.log(`Applied mapping "${mapping.name}" to ${mappedData.length} rows`);
+    return mappedData;
+  }
+
+  /**
+   * Get a nested value from an object using dot notation
+   */
+  private getNestedValue(obj: any, path: string): any {
+    return path.split('.').reduce((current, key) => {
+      return current && current[key] !== undefined ? current[key] : undefined;
+    }, obj);
+  }
+
+  /**
+   * Set a nested value in an object using dot notation
+   */
+  private setNestedValue(obj: any, path: string, value: any): void {
+    const keys = path.split('.');
+    const lastKey = keys.pop()!;
+
+    const target = keys.reduce((current, key) => {
+      if (!current[key]) {
+        current[key] = {};
+      }
+      return current[key];
+    }, obj);
+
+    target[lastKey] = value;
+  }
+
+  /**
+   * Apply a transformation to a value based on the mapping rule
+   */
+  private applyTransformation(value: any, rule: any): any {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    switch (rule.transform) {
+      case 'uppercase':
+        return String(value).toUpperCase();
+      case 'lowercase':
+        return String(value).toLowerCase();
+      case 'string-to-number':
+        return Number(value);
+      case 'number-to-string':
+        return String(value);
+      case 'boolean-to-string':
+        return String(value);
+      case 'json-stringify':
+        return JSON.stringify(value);
+      case 'json-parse':
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      case 'date-format':
+        try {
+          const date = new Date(value);
+          const format = rule.transformConfig?.format || 'ISO';
+          if (format === 'ISO') return date.toISOString();
+          return date.toLocaleDateString();
+        } catch {
+          return value;
+        }
+      case 'number-format':
+        try {
+          const format = rule.transformConfig?.format || '0.00';
+          return Number(value).toFixed(format.split('.')[1]?.length || 0);
+        } catch {
+          return value;
+        }
+      case 'direct':
+      default:
+        return value;
+    }
   }
 
   /**
