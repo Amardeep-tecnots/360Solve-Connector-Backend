@@ -31,9 +31,10 @@ async function bootstrap() {
     forbidNonWhitelisted: true,
   }));
 
-  // CORS for frontend
+  // CORS for frontend - allow network access in development
+  const corsOrigin = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || true;
   app.enableCors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: corsOrigin,
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'X-Correlation-Id'],
   });
@@ -57,7 +58,7 @@ async function bootstrap() {
   });
 
   const port = process.env.PORT || 3001;
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
 
   logger.info('🚀 Control Plane started', {
     port,

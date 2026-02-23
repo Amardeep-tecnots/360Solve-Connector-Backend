@@ -35,6 +35,10 @@ export class WebSocketService extends EventEmitter {
     this.apiKey = apiKey;
 
     try {
+      // Log the API URL being used
+      const apiUrl = process.env.API_URL || 'http://localhost:3001';
+      console.log('[WS] API URL:', apiUrl);
+
       // Validate API key format
       if (!this.apiKeyAuthService.validateApiKey(apiKey)) {
         throw new Error('Invalid API key format');

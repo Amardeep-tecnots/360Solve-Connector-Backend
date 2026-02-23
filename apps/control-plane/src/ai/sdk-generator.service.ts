@@ -28,6 +28,36 @@ interface ModelConfig {
   fallback?: string;
 }
 
+/**
+ * Field definition extracted from OpenAPI spec
+ */
+interface ExtractedField {
+  name: string;
+  type: string;
+  required?: boolean;
+  in?: string; // path, query, header, body
+  description?: string;
+}
+
+/**
+ * Endpoint definition extracted from OpenAPI spec
+ */
+interface ExtractedEndpoint {
+  path: string;
+  method: string;
+  summary?: string;
+  requestFields?: ExtractedField[];
+  responseFields?: ExtractedField[];
+}
+
+/**
+ * Extracted schema from OpenAPI spec
+ */
+interface ExtractedSchema {
+  fields: ExtractedField[];
+  endpoints: ExtractedEndpoint[];
+}
+
 @Injectable()
 export class SDKGeneratorService {
   private readonly logger = new Logger(SDKGeneratorService.name);
@@ -165,13 +195,28 @@ export class SDKGeneratorService {
       // Step 5: Compile to WASM
       const compiled = await this.wasmCompiler.compile(sdkCode);
 
-      // Step 6: Save to database and storage
+      // Step 6: Extract fields from OpenAPI spec for auto schema discovery
+      const extractedSchema = this.extractFieldsFromOpenApiSpec(parsedSpec);
+      this.logger.log(`Extracted ${extractedSchema.fields.length} fields and ${extractedSchema.endpoints.length} endpoints`);
+
+      // Step 7: Save to database and storage
       // Store code in S3
       await this.storage.uploadFile(
         `tenants/global/sdks/${sdkId}/code.ts`,
         sdkCode,
         'text/typescript'
       );
+
+      // Build configSchema with extracted fields for auto schema discovery
+      const configSchema: any = {
+        baseUrl: parsedSpec.servers?.[0]?.url || '',
+        authType: 'bearer',
+        endpointCount,
+        modelUsed: modelConfig.model,
+        // Store extracted fields and endpoints for auto schema discovery
+        fields: extractedSchema.fields,
+        endpoints: extractedSchema.endpoints,
+      };
 
       // Check if we're updating an existing aggregator or creating new
       const existingAggregator = await this.prisma.aggregator.findUnique({
@@ -185,12 +230,7 @@ export class SDKGeneratorService {
           data: {
             name: className,
             description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
-            configSchema: {
-              baseUrl: parsedSpec.servers?.[0]?.url || '',
-              authType: 'bearer',
-              endpointCount,
-              modelUsed: modelConfig.model,
-            },
+            configSchema,
             sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
             sdkVersion: (existingAggregator.sdkVersion || 0) + 1,
             // Store credentials if provided
@@ -217,12 +257,7 @@ export class SDKGeneratorService {
             version: '1.0.0',
             capabilities: ['read', 'query'],
             authMethods: ['apiKey', 'bearer'],
-            configSchema: {
-              baseUrl: parsedSpec.servers?.[0]?.url || '',
-              authType: 'bearer',
-              endpointCount,
-              modelUsed: modelConfig.model,
-            },
+            configSchema,
             sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
             sdkVersion: 1,
             isPublic: false,
@@ -264,6 +299,186 @@ export class SDKGeneratorService {
    */
   private selectModel(endpointCount: number, specSizeKB: number): ModelConfig {
     return this.aiProvider.selectBestModel(endpointCount, specSizeKB, this.aiTier);
+  }
+
+  /**
+   * Extract fields and endpoints from OpenAPI spec
+   * This enables auto schema discovery for AI-generated SDKs
+   */
+  private extractFieldsFromOpenApiSpec(parsedSpec: any): ExtractedSchema {
+    const fields: ExtractedField[] = [];
+    const endpoints: ExtractedEndpoint[] = [];
+    const seenFields = new Set<string>();
+
+    // Extract from components/schemas (shared type definitions)
+    const schemas = parsedSpec.components?.schemas || {};
+    for (const [schemaName, schemaDef] of Object.entries(schemas)) {
+      const schema = schemaDef as any;
+      const properties = schema.properties || {};
+      
+      for (const [propName, propDef] of Object.entries(properties)) {
+        const prop = propDef as any;
+        const fieldName = `${schemaName}.${propName}`;
+        
+        if (!seenFields.has(fieldName)) {
+          seenFields.add(fieldName);
+          fields.push({
+            name: fieldName,
+            type: this.mapOpenApiType(prop.type),
+            required: (schema.required || []).includes(propName),
+            in: 'body',
+            description: prop.description,
+          });
+        }
+      }
+    }
+
+    // Extract from paths/endpoints
+    const paths = parsedSpec.paths || {};
+    for (const [path, pathItem] of Object.entries(paths)) {
+      const pathItemObj = pathItem as any;
+      const methods = ['get', 'post', 'put', 'patch', 'delete', 'options', 'head'];
+      
+      for (const method of methods) {
+        const operation = pathItemObj[method];
+        if (!operation) continue;
+
+        const endpoint: ExtractedEndpoint = {
+          path,
+          method: method.toUpperCase(),
+          summary: operation.summary,
+          requestFields: [],
+          responseFields: [],
+        };
+
+        // Extract from parameters (path, query, header)
+        const parameters = operation.parameters || [];
+        for (const param of parameters) {
+          const paramObj = param as any;
+          const fieldName = paramObj.name;
+          const fieldKey = `${method}:${path}:${fieldName}`;
+          
+          if (!seenFields.has(fieldKey)) {
+            seenFields.add(fieldKey);
+            const field: ExtractedField = {
+              name: fieldName,
+              type: this.mapOpenApiType(paramObj.schema?.type),
+              required: paramObj.required === true,
+              in: paramObj.in || 'query',
+              description: paramObj.description,
+            };
+            
+            fields.push(field);
+            endpoint.requestFields?.push(field);
+          }
+        }
+
+        // Extract from requestBody
+        const requestBody = operation.requestBody;
+        if (requestBody) {
+          const content = requestBody.content || {};
+          const jsonContent = content['application/json'];
+          if (jsonContent?.schema) {
+            this.extractFieldsFromSchema(jsonContent.schema, endpoint.requestFields || [], seenFields, 'body');
+          }
+        }
+
+        // Extract from responses
+        const responses = operation.responses || {};
+        for (const [statusCode, response] of Object.entries(responses)) {
+          const responseObj = response as any;
+          if (statusCode.startsWith('2') || statusCode === 'default') {
+            const content = responseObj.content || {};
+            const jsonContent = content['application/json'];
+            if (jsonContent?.schema) {
+              this.extractFieldsFromSchema(jsonContent.schema, endpoint.responseFields || [], seenFields, 'response');
+            }
+          }
+        }
+
+        endpoints.push(endpoint);
+      }
+    }
+
+    this.logger.log(`Extracted ${fields.length} fields and ${endpoints.length} endpoints from OpenAPI spec`);
+    return { fields, endpoints };
+  }
+
+  /**
+   * Recursively extract fields from a schema
+   */
+  private extractFieldsFromSchema(
+    schema: any,
+    targetFields: ExtractedField[],
+    seenFields: Set<string>,
+    location: string,
+    prefix: string = ''
+  ): void {
+    if (!schema) return;
+
+    // Handle $ref (reference to other schema)
+    if (schema.$ref) {
+      // Extract name from ref like '#/components/schemas/User'
+      const refParts = schema.$ref.split('/');
+      const refName = refParts[refParts.length - 1];
+      return; // Would need to resolve the reference - handled in main extraction
+    }
+
+    // Handle array type
+    if (schema.type === 'array' && schema.items) {
+      this.extractFieldsFromSchema(schema.items, targetFields, seenFields, location, prefix);
+      return;
+    }
+
+    // Handle object type
+    if (schema.type === 'object' || schema.properties) {
+      const properties = schema.properties || {};
+      for (const [propName, propDef] of Object.entries(properties)) {
+        const prop = propDef as any;
+        const fieldName = prefix ? `${prefix}.${propName}` : propName;
+        const fieldKey = `${location}:${fieldName}`;
+        
+        if (!seenFields.has(fieldKey)) {
+          seenFields.add(fieldKey);
+          targetFields.push({
+            name: fieldName,
+            type: this.mapOpenApiType(prop.type),
+            required: (schema.required || []).includes(propName),
+            in: location,
+            description: prop.description,
+          });
+        }
+
+        // Recursively extract nested properties
+        if (prop.properties || (prop.type === 'object')) {
+          this.extractFieldsFromSchema(prop, targetFields, seenFields, location, fieldName);
+        }
+      }
+    }
+  }
+
+  /**
+   * Map OpenAPI types to simpler types
+   */
+  private mapOpenApiType(openApiType?: string): string {
+    if (!openApiType) return 'any';
+    
+    const typeMap: Record<string, string> = {
+      'string': 'string',
+      'number': 'number',
+      'integer': 'number',
+      'boolean': 'boolean',
+      'array': 'array',
+      'object': 'object',
+      'file': 'file',
+      'date': 'date',
+      'date-time': 'datetime',
+      'email': 'string',
+      'uri': 'string',
+      'uuid': 'string',
+    };
+
+    return typeMap[openApiType.toLowerCase()] || 'any';
   }
 
   /**

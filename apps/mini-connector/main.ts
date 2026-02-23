@@ -1,16 +1,26 @@
-// Only load dotenv in development mode
+// Load dotenv - in production, look for .env next to executable
+import * as path from 'path';
+import * as fs from 'fs';
+const dotenv = require('dotenv');
+
 if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
+  // Development: load from current working directory
+  dotenv.config();
+} else {
+  // Production: try to load .env from the executable's directory
+  const envPath = path.join(path.dirname(process.execPath), '.env');
+  if (fs.existsSync(envPath)) {
+    console.log('[MAIN] Loading .env from:', envPath);
+    dotenv.config({ path: envPath });
+  } else {
+    console.log('[MAIN] No .env file found at:', envPath, '- using defaults');
+  }
 }
 console.log('[MAIN] File loading...');
 
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron';
 console.log('[MAIN] electron imported');
-
-import * as fs from 'fs';
 console.log('[MAIN] fs imported');
-
-import * as path from 'path';
 console.log('[MAIN] path imported');
 
 import * as os from 'os';

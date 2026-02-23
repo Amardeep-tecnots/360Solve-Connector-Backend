@@ -10,5 +10,6 @@ import { WebsocketModule } from '../websocket/websocket.module';
   imports: [WebsocketModule],
   controllers: [ConnectorsController, PublicConnectorsController],
   providers: [ConnectorsService, PrismaService, ConnectorApiKeyGuard, MiniConnectorProxyService],
+  exports: [MiniConnectorProxyService],
 })
 export class ConnectorsModule {}

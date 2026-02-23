@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { AIProviderService } from '../ai/ai-provider.service';
+import { MiniConnectorProxyService } from '../connectors/mini-connector-proxy.service';
 import {
   CreateMappingDto,
   UpdateMappingDto,
@@ -70,6 +71,7 @@ export class MappingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aiProvider: AIProviderService,
+    private readonly miniConnectorProxy: MiniConnectorProxyService,
   ) {}
 
   // ============================================
@@ -769,13 +771,15 @@ export class MappingsService {
   }> {
     let schema = config.schema || {};
     let name = config.name;
+    let actualType = config.type;
 
-    // If instance ID provided, get additional context
+    // If instance ID provided, get additional context including connector info
     if (config.instanceId) {
       const instance = await this.prisma.aggregatorInstance.findFirst({
         where: { id: config.instanceId, tenantId },
         include: {
-          aggregator: { select: { id: true, name: true, category: true } },
+          aggregator: { select: { id: true, name: true, category: true, type: true } },
+          connector: { select: { id: true, name: true, type: true } },
         },
       });
 
@@ -788,20 +792,380 @@ export class MappingsService {
         // Add aggregator context
         schema.aggregatorName = instance.aggregator.name;
         schema.aggregatorCategory = instance.aggregator.category;
+        schema.aggregatorType = instance.aggregator.type;
+        
+        // Determine the actual type based on connector or aggregator
+        // Priority: connector type > aggregator category > provided type
+        if (instance.connector) {
+          // This is a mini-connector based instance
+          schema.connectorType = instance.connector.type;
+          schema.connectorName = instance.connector.name;
+          actualType = 'mini-connector';
+        } else {
+          // Determine type from aggregator category
+          const categoryLower = instance.aggregator.category.toLowerCase();
+          if (categoryLower.includes('api') || categoryLower.includes('sdk') || categoryLower.includes('rest')) {
+            actualType = 'sdk';
+          } else if (categoryLower.includes('database') || categoryLower.includes('sql')) {
+            actualType = 'database';
+          } else {
+            actualType = 'aggregator';
+          }
+        }
+
+        // NEW: For SDK/API types, also get fields from aggregator's configSchema
+        // This enables auto schema for AI-generated SDKs
+        if ((actualType === 'sdk' || actualType === 'api' || actualType === 'aggregator') && !schema.fields?.length) {
+          try {
+            // For AI-generated SDKs, the instance ID IS the aggregator ID (they start with "sdk-")
+            // So we should query by instance.id directly, not instance.aggregatorId
+            const aggregatorIdToQuery = config.instanceId?.startsWith('sdk-') 
+              ? config.instanceId 
+              : (instance ? instance.aggregatorId : null);
+            
+            if (!aggregatorIdToQuery) {
+              this.logger.warn(`No aggregator ID to query for: ${config.instanceId}`);
+            } else {
+              this.logger.log(`Fetching aggregator configSchema for: ${aggregatorIdToQuery}`);
+              
+              // Fetch the full aggregator to get configSchema
+              const fullAggregator = await this.prisma.aggregator.findUnique({
+                where: { id: aggregatorIdToQuery },
+                select: { configSchema: true, name: true },
+              });
+              
+              if (fullAggregator?.configSchema) {
+                const configSchema = fullAggregator.configSchema as Record<string, any>;
+                
+                // Use fields from configSchema if available
+                if (configSchema.fields && Array.isArray(configSchema.fields)) {
+                  this.logger.log(`Found ${configSchema.fields.length} fields in aggregator configSchema for SDK`);
+                  schema.fields = configSchema.fields;
+                }
+                
+                // Also use endpoints if available (for AI-generated SDKs)
+                if (configSchema.endpoints && Array.isArray(configSchema.endpoints)) {
+                  schema.endpoints = configSchema.endpoints;
+                }
+              }
+            }
+          } catch (err) {
+            this.logger.warn(`Failed to fetch aggregator configSchema: ${err}`);
+          }
+        }
+      } else if (config.instanceId?.startsWith('sdk-') && !schema.fields?.length) {
+        // Fallback: If no instance found but instanceId starts with "sdk-", directly query the aggregator
+        try {
+          this.logger.log(`Directly fetching aggregator for SDK: ${config.instanceId}`);
+          const fullAggregator = await this.prisma.aggregator.findUnique({
+            where: { id: config.instanceId },
+            select: { configSchema: true, name: true },
+          });
+          
+          if (fullAggregator?.configSchema) {
+            const configSchema = fullAggregator.configSchema as Record<string, any>;
+            
+            if (configSchema.fields && Array.isArray(configSchema.fields)) {
+              this.logger.log(`Found ${configSchema.fields.length} fields in SDK aggregator configSchema`);
+              schema.fields = configSchema.fields;
+              schema.aggregatorName = fullAggregator.name;
+            }
+            
+            if (configSchema.endpoints && Array.isArray(configSchema.endpoints)) {
+              schema.endpoints = configSchema.endpoints;
+            }
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to fetch SDK aggregator directly: ${err}`);
+        }
       }
     }
 
-    // Use provided fields if available
+    // If connector ID is provided directly (not via instance), fetch schema from mini-connector
+    if (config.connectorId && !config.instanceId) {
+      const connector = await this.prisma.connector.findFirst({
+        where: { id: config.connectorId, tenantId },
+      });
+
+      if (connector) {
+        schema.connectorType = connector.type;
+        schema.connectorName = connector.name;
+        actualType = 'mini-connector';
+
+        // Auto-fetch schema from mini-connector if no fields provided
+        if (!config.fields?.length && connector.type === 'MINI') {
+          try {
+            this.logger.log(`Fetching schema from mini-connector: ${connector.id}`);
+            const fetchedSchema = await this.fetchMiniConnectorSchema(tenantId, connector.id);
+            schema = { ...schema, ...fetchedSchema };
+          } catch (error: any) {
+            this.logger.warn(`Failed to fetch schema from mini-connector ${connector.id}: ${error.message}`);
+          }
+        }
+      }
+    }
+
+    // If no schema fields and type is database/sdk/aggregator, try to fetch from aggregator
+    if (!config.fields?.length && !schema.fields && !schema.tables) {
+      const typeCategory = actualType.toLowerCase();
+      
+      if (typeCategory === 'database' || typeCategory === 'sdk' || typeCategory === 'aggregator') {
+        // Try to find aggregator by name and get its configSchema
+        try {
+          this.logger.log(`Fetching schema for ${actualType}: ${name}`);
+          const aggregatorSchema = await this.fetchAggregatorSchema(tenantId, name, actualType);
+          if (aggregatorSchema) {
+            schema = { ...schema, ...aggregatorSchema };
+          }
+        } catch (error: any) {
+          this.logger.warn(`Failed to fetch schema for ${name}: ${error.message}`);
+        }
+      }
+    }
+
+    // Use provided fields if available - BUT only if they are real data fields (not placeholder "method" types)
+    // For SDKs/API, we prefer to use fields from aggregator's configSchema
     if (config.fields && config.fields.length > 0) {
-      schema.fields = config.fields;
+      // Check if the provided fields are just placeholder "method" types (not real data fields)
+      const hasRealFields = config.fields.some((f: any) => 
+        f.type && f.type !== 'method' && f.type !== 'password'
+      );
+      
+      // Only use provided fields if they contain real data, otherwise prefer schema from configSchema
+      if (hasRealFields || !schema.fields) {
+        schema.fields = config.fields;
+      } else {
+        this.logger.log(`Ignoring placeholder fields from frontend, using fields from aggregator configSchema`);
+      }
+    }
+
+    // Check aggregator category for SDK type detection (fallback)
+    if (schema.aggregatorCategory) {
+      const categoryLower = schema.aggregatorCategory.toLowerCase();
+      if (categoryLower.includes('api') || categoryLower.includes('sdk') || categoryLower.includes('rest')) {
+        actualType = 'sdk';
+      } else if (categoryLower.includes('database') || categoryLower.includes('sql')) {
+        actualType = 'database';
+      }
     }
 
     return {
-      type: config.type,
+      type: actualType,
       name,
       schema,
       description: config.description,
     };
+  }
+
+  /**
+   * Fetch schema from mini-connector by getting databases, tables, and columns
+   */
+  private async fetchMiniConnectorSchema(tenantId: string, connectorId: string): Promise<Record<string, any>> {
+    try {
+      // Get databases from mini-connector
+      const databasesResponse: any = await this.miniConnectorProxy.getDatabases(tenantId, connectorId);
+      const databases = databasesResponse?.databases || databasesResponse?.data?.databases || [];
+      
+      if (!databases || databases.length === 0) {
+        return { tables: [] };
+      }
+
+      // Get tables from first database (or all databases)
+      const tables: SchemaTable[] = [];
+      
+      for (const dbName of databases.slice(0, 3)) { // Limit to first 3 databases
+        try {
+          const tablesResponse: any = await this.miniConnectorProxy.getTables(tenantId, connectorId, dbName);
+          const tableNames = tablesResponse?.tables || tablesResponse?.data?.tables || [];
+          
+          for (const tableName of tableNames.slice(0, 10)) { // Limit to first 10 tables per DB
+            try {
+              const columnsResponse: any = await this.miniConnectorProxy.getColumns(tenantId, connectorId, dbName, tableName);
+              const columns = columnsResponse?.columns || columnsResponse?.data?.columns || [];
+              
+              tables.push({
+                name: `${dbName}.${tableName}`,
+                columns: columns.map((col: any) => ({
+                  name: col.name || col.columnName,
+                  type: col.type || col.dataType || 'string',
+                  nullable: col.nullable !== false,
+                  primaryKey: col.primaryKey === true,
+                })),
+              });
+            } catch (colError) {
+              // Skip tables where we can't get columns
+              tables.push({
+                name: `${dbName}.${tableName}`,
+                columns: [],
+              });
+            }
+          }
+        } catch (tableError) {
+          // Skip databases where we can't get tables
+        }
+      }
+
+      return { tables };
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch mini-connector schema: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch schema from aggregator (for SDK, database, or aggregator types)
+   * First checks aggregator instances (which have discoveredSchema), then falls back to aggregator config
+   */
+  private async fetchAggregatorSchema(tenantId: string, name: string, type: string): Promise<Record<string, any> | null> {
+    try {
+      // First, try to find an AGGREGATOR INSTANCE by name (this has discoveredSchema with tables/columns)
+      const instance = await this.prisma.aggregatorInstance.findFirst({
+        where: {
+          tenantId,
+          name: { contains: name, mode: 'insensitive' },
+        },
+        include: {
+          aggregator: { select: { id: true, name: true, category: true, type: true } },
+          connector: { select: { id: true, name: true, type: true } },
+        },
+      });
+
+      if (instance) {
+        this.logger.log(`Found instance by name "${name}": ${instance.id}`);
+        
+        // Use discovered schema if available
+        if (instance.discoveredSchema) {
+          return {
+            ...(instance.discoveredSchema as Record<string, any>),
+            aggregatorName: instance.aggregator.name,
+            aggregatorCategory: instance.aggregator.category,
+            aggregatorType: instance.aggregator.type,
+            instanceId: instance.id,
+          };
+        }
+        
+        // If no discoveredSchema but has connector (mini-connector instance), fetch from connector
+        if (instance.connectorId && instance.connector?.type === 'MINI') {
+          try {
+            const fetchedSchema = await this.fetchMiniConnectorSchema(tenantId, instance.connectorId);
+            return {
+              ...fetchedSchema,
+              aggregatorName: instance.aggregator.name,
+              aggregatorCategory: instance.aggregator.category,
+              aggregatorType: instance.aggregator.type,
+              instanceId: instance.id,
+            };
+          } catch (err) {
+            this.logger.warn(`Failed to fetch schema from mini-connector: ${err}`);
+          }
+        }
+      }
+
+      // Second, try to find AGGREGATOR by name (this has configSchema with auth fields)
+      const aggregator = await this.prisma.aggregator.findFirst({
+        where: {
+          tenantId,
+          name: { contains: name, mode: 'insensitive' },
+        },
+      });
+
+      if (aggregator) {
+        this.logger.log(`Found aggregator by name "${name}": ${aggregator.id}`);
+        return this.buildSchemaFromAggregator(aggregator);
+      }
+
+      // Third, try finding by category match
+      const categoryMap: Record<string, string> = {
+        'database': 'database',
+        'sdk': 'api',
+        'aggregator': 'crm',
+      };
+      
+      const categorySearch = categoryMap[type] || type;
+      
+      // First check instances by category
+      const instancesByCategory = await this.prisma.aggregatorInstance.findMany({
+        where: {
+          tenantId,
+          aggregator: { category: { contains: categorySearch, mode: 'insensitive' } },
+        },
+        include: {
+          aggregator: { select: { id: true, name: true, category: true, type: true } },
+        },
+        take: 1,
+      });
+      
+      if (instancesByCategory.length > 0) {
+        const inst = instancesByCategory[0];
+        if (inst.discoveredSchema) {
+          return {
+            ...(inst.discoveredSchema as Record<string, any>),
+            aggregatorName: inst.aggregator.name,
+            aggregatorCategory: inst.aggregator.category,
+            aggregatorType: inst.aggregator.type,
+            instanceId: inst.id,
+          };
+        }
+      }
+      
+      // Then check aggregators by category
+      const aggregators = await this.prisma.aggregator.findMany({
+        where: {
+          tenantId,
+          category: { contains: categorySearch, mode: 'insensitive' },
+        },
+        take: 1,
+      });
+      
+      if (aggregators.length > 0) {
+        return this.buildSchemaFromAggregator(aggregators[0]);
+      }
+      
+      this.logger.warn(`No schema found for "${name}" with type "${type}"`);
+      return null;
+    } catch (error: any) {
+      this.logger.warn(`Failed to fetch aggregator schema: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Build schema object from aggregator definition
+   */
+  private buildSchemaFromAggregator(aggregator: any): Record<string, any> {
+    const schema: Record<string, any> = {
+      aggregatorName: aggregator.name,
+      aggregatorCategory: aggregator.category,
+      aggregatorType: aggregator.type,
+    };
+
+    // Use configSchema if available (defines API fields for SDKs)
+    if (aggregator.configSchema) {
+      const configSchema = aggregator.configSchema as Record<string, any>;
+      
+      if (configSchema.fields) {
+        schema.fields = configSchema.fields.map((f: any) => ({
+          name: f.name,
+          type: f.type || 'string',
+          nullable: f.required !== true,
+          description: f.description,
+        }));
+      } else if (configSchema.endpoints) {
+        // For API aggregators, use endpoint definitions
+        schema.fields = [];
+        for (const endpoint of configSchema.endpoints) {
+          if (endpoint.requestFields) {
+            schema.fields.push(...endpoint.requestFields.map((f: any) => ({
+              name: f.name,
+              type: f.type || 'string',
+              nullable: f.required !== true,
+            })));
+          }
+        }
+      }
+    }
+
+    return schema;
   }
 
   private async generateAIMapping(
@@ -827,7 +1191,7 @@ export class MappingsService {
         }
       );
 
-      // Parse response
+      // Parse response - use enhanced JSON cleaning
       const cleanedResponse = this.cleanJsonResponse(response);
       const result = JSON.parse(cleanedResponse);
 
@@ -839,7 +1203,9 @@ export class MappingsService {
 
     } catch (error: any) {
       this.logger.error(`AI mapping generation failed: ${error.message}`);
-      return null;
+      // Log the raw response for debugging
+      // this.logger.error(`Raw AI response: ${response}`);
+      // return null;
     }
   }
 
@@ -928,6 +1294,13 @@ Generate the optimal field mappings. Respond with JSON only.`;
       .join('\n');
   }
 
+  /**
+   * Enhanced JSON cleaning method that handles:
+   * - Markdown code blocks
+   * - Trailing commas
+   * - Extracting JSON from text with surrounding content
+   * - Incomplete JSON responses
+   */
   private cleanJsonResponse(response: string): string {
     let cleaned = response.trim();
 
@@ -939,6 +1312,30 @@ Generate the optimal field mappings. Respond with JSON only.`;
     if (cleaned.endsWith('```')) {
       cleaned = cleaned.slice(0, -3);
     }
+
+    // Try to find JSON object in the response (in case AI added text before/after)
+    const jsonStart = cleaned.indexOf('{');
+    const jsonEnd = cleaned.lastIndexOf('}');
+    
+    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+      cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+    } else {
+      // Try array format
+      const arrayStart = cleaned.indexOf('[');
+      const arrayEnd = cleaned.lastIndexOf(']');
+      if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {
+        cleaned = cleaned.slice(arrayStart, arrayEnd + 1);
+      }
+    }
+
+    // Fix trailing commas (common AI mistake)
+    cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+    // Remove any remaining non-JSON content
+    // Keep only valid JSON characters
+    cleaned = cleaned
+      .replace(/^[^{\[]+/, '')  // Remove anything before { or [
+      .replace(/[^}\]]+$/, ''); // Remove anything after } or ]
 
     return cleaned.trim();
   }

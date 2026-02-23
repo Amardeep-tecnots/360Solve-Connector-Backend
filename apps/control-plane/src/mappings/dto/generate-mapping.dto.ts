@@ -42,7 +42,7 @@ export class GenerateSchemaFieldDto {
 export class GenerateSchemaConfigDto {
   @ApiPropertyOptional({ description: 'Aggregator instance ID (if using existing instance)' })
   @IsOptional()
-  @IsUUID()
+  @IsString()
   instanceId?: string;
 
   @ApiProperty({ description: 'Type of data source', enum: SourceTypeDto })
@@ -51,7 +51,7 @@ export class GenerateSchemaConfigDto {
 
   @ApiPropertyOptional({ description: 'Connector ID (for mini-connector sources)' })
   @IsOptional()
-  @IsUUID()
+  @IsString()
   connectorId?: string;
 
   @ApiProperty({ description: 'Table name, endpoint name, or object name' })
