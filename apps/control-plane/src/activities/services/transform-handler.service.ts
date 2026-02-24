@@ -34,13 +34,37 @@ export class TransformHandlerService extends BaseActivityHandler {
 
       // Get the first input (for single input transforms)
       const inputData = Object.values(inputs)[0];
-      if (!Array.isArray(inputData)) {
-        throw new Error('Transform input must be an array');
+      
+      // Handle different input formats:
+      // 1. Direct array: [{}, {}, ...]
+      // 2. Wrapped object with data property: { data: [...], columns: [...] }
+      // 3. Object with error (from failed source): { error: "..." }
+      let dataArray: any[];
+      
+      if (Array.isArray(inputData)) {
+        dataArray = inputData;
+      } else if (inputData && typeof inputData === 'object') {
+        // Check if it's a wrapped response with data property
+        if (Array.isArray(inputData.data)) {
+          dataArray = inputData.data;
+        } else if (inputData.error) {
+          // This is an error response from source - propagate the error
+          throw new Error(`Source data error: ${inputData.error}`);
+        } else {
+          // Single object - wrap in array
+          dataArray = [inputData];
+        }
+      } else {
+        throw new Error('Transform input must be an array or object with data property');
+      }
+
+      if (dataArray.length === 0) {
+        throw new Error('Transform input has no data to process');
       }
 
       // Execute transformation
       const result = await this.transformService.transform(
-        inputData,
+        dataArray,
         config.code,
         {
           executionId: context.executionId,

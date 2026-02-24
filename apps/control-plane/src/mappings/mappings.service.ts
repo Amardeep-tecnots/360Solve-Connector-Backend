@@ -15,6 +15,7 @@ import {
   ApplyMappingDto,
   ValidateMappingDto,
 } from './dto/generate-mapping.dto';
+import { response } from 'express';
 
 /**
  * Mapping rule structure
@@ -1179,7 +1180,7 @@ export class MappingsService {
 
     // Build user prompt with schema details
     const userPrompt = this.buildUserPrompt(sourceContext, destContext, hint);
-
+    let response = '';
     try {
       const response = await this.aiProvider.completeText(
         userPrompt,
@@ -1204,8 +1205,8 @@ export class MappingsService {
     } catch (error: any) {
       this.logger.error(`AI mapping generation failed: ${error.message}`);
       // Log the raw response for debugging
-      // this.logger.error(`Raw AI response: ${response}`);
-      // return null;
+      this.logger.error(`Raw AI response: ${response}`);
+      return null;
     }
   }
 
