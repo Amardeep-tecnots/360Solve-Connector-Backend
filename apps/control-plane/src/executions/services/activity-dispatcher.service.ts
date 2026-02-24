@@ -106,6 +106,16 @@ export class ActivityDispatcherService {
           config.connectorId,
         );
 
+        // Check if the response indicates an error from the connector
+        // Mini connector may return { data: { error: "...", status: "failed" } }
+        if (response && response.data && response.data.error) {
+          throw new Error(`Mini connector source error: ${response.data.error}`);
+        }
+        
+        if (response && response.error) {
+          throw new Error(`Mini connector source error: ${response.error}`);
+        }
+
         // Wrap response with source metadata
         return {
           data: response.data || response,

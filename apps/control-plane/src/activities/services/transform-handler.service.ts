@@ -38,7 +38,7 @@ export class TransformHandlerService extends BaseActivityHandler {
       // Handle different input formats:
       // 1. Direct array: [{}, {}, ...]
       // 2. Wrapped object with data property: { data: [...], columns: [...] }
-      // 3. Object with error (from failed source): { error: "..." }
+      // 3. Object with error (from failed source): { error: "..." } or { data: { error: "...", status: "failed" } }
       let dataArray: any[];
       
       if (Array.isArray(inputData)) {
@@ -46,10 +46,18 @@ export class TransformHandlerService extends BaseActivityHandler {
       } else if (inputData && typeof inputData === 'object') {
         // Check if it's a wrapped response with data property
         if (Array.isArray(inputData.data)) {
+          // Check for nested error in data - this is common from mini-connector-source
+          if (inputData.data.error || (inputData.data.data && inputData.data.data.error)) {
+            const nestedError = inputData.data.error || inputData.data.data.error;
+            throw new Error(`Source data error: ${nestedError}`);
+          }
           dataArray = inputData.data;
         } else if (inputData.error) {
           // This is an error response from source - propagate the error
           throw new Error(`Source data error: ${inputData.error}`);
+        } else if (inputData.data && inputData.data.error) {
+          // Error is nested in data property - propagate it
+          throw new Error(`Source data error: ${inputData.data.error}`);
         } else {
           // Single object - wrap in array
           dataArray = [inputData];
