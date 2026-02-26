@@ -129,7 +129,7 @@ export class ConnectorsService {
       where: {
         tenantId,
         type: 'MINI',
-        status: { in: ['OFFLINE', 'ONLINE'] },
+        status: { in: ['OFFLINE', 'ONLINE', 'BUSY'] },
       },
       orderBy: { createdAt: 'desc' },
     });

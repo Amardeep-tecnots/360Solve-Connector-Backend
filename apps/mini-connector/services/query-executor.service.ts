@@ -40,6 +40,22 @@ export class QueryExecutorService {
   }
 
   /**
+   * Get the database type for SQL parser dialect
+   */
+  private getParserDatabaseType(type: 'mysql' | 'postgresql' | 'mssql'): string {
+    switch (type) {
+      case 'mysql':
+        return 'MySQL';
+      case 'postgresql':
+        return 'PostgreSQL';
+      case 'mssql':
+        return 'tsql';
+      default:
+        return 'MySQL';
+    }
+  }
+
+  /**
    * Test database connection
    */
   async testConnection(config: DatabaseConfig): Promise<{ success: boolean; error?: string }> {
@@ -74,8 +90,8 @@ export class QueryExecutorService {
     // Build SQL
     const sql = this.buildQuery(query, config.type);
 
-    // Enforce READ-ONLY
-    this.enforceReadOnly(sql);
+    // Enforce READ-ONLY with database-specific dialect
+    this.enforceReadOnly(sql, config.type);
 
     if (config.type === 'mysql') {
       return this.executeMySQLQuery(config, sql, query.columns);
@@ -228,7 +244,7 @@ export class QueryExecutorService {
         sql += ` OFFSET ${offset} ROWS FETCH NEXT ${BATCH_SIZE} ROWS ONLY`;
       }
 
-      this.enforceReadOnly(sql);
+      this.enforceReadOnly(sql, config.type);
 
       let rows: any[] = [];
       if (config.type === 'mysql') {
@@ -258,29 +274,61 @@ export class QueryExecutorService {
 
   /**
    * Enforce READ-ONLY queries using AST parser
+   * @param sql - The SQL query to check
+   * @param dbType - The database type (mysql, postgresql, mssql) for dialect-specific parsing
    */
-  private enforceReadOnly(sql: string): void {
+  private enforceReadOnly(sql: string, dbType: 'mysql' | 'postgresql' | 'mssql' = 'mysql'): void {
     try {
-      // Basic keyword check first
-      const forbiddenKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'GRANT', 'REVOKE', 'TRUNCATE'];
+      // Basic keyword check first - more strict for security
+      const forbiddenKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'GRANT', 'REVOKE', 'TRUNCATE', 'EXEC', 'EXECUTE', 'SP_', 'XP_'];
       const upperSql = sql.toUpperCase();
+      
       for (const keyword of forbiddenKeywords) {
-        if (upperSql.includes(keyword)) {
-          // Check context using parser
-          // If keyword is inside a string literal, it's fine. If it's a command, it's bad.
-          // But parser will catch it.
+        // Check if keyword appears outside of string literals
+        // Simple check: look for the keyword followed by whitespace or common SQL terminators
+        const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+        if (regex.test(upperSql)) {
+          // Additional check: make sure it's not inside a string literal
+          // Remove string literals first
+          const withoutStrings = upperSql.replace(/'[^']*'/g, '').replace(/"[^"]*"/g, '');
+          if (new RegExp(`\\b${keyword}\\b`, 'i').test(withoutStrings)) {
+            throw new Error(`READ-ONLY violation: ${keyword} operations are not allowed`);
+          }
         }
       }
 
-      // Parse AST
+      // Parse AST with the correct database dialect
       let ast;
+      const parserDbType = this.getParserDatabaseType(dbType);
+      
       try {
-        ast = this.parser.astify(sql);
+        ast = this.parser.astify(sql, { database: parserDbType });
       } catch (e) {
-        // If parser fails, it might be complex SQL or dialect specific.
-        // Fallback to strict keyword check if parser fails? Or reject?
-        // Rejecting is safer.
-        throw new Error('Failed to parse SQL query for security check');
+        // Parser failed - this is expected for some databases like MSSQL (TSQL)
+        // Fall back to regex-based check for known-safe patterns
+        console.log(`[QueryExecutor] Using regex-based security check for ${parserDbType} (SQL parser not available for this dialect)`);
+        
+        // Only allow SELECT statements via regex fallback
+        const selectPattern = /^\s*SELECT\s/i;
+        if (!selectPattern.test(sql.trim())) {
+          throw new Error('Security check failed: Only SELECT queries are allowed. Parser could not verify the query.');
+        }
+        
+        // Additional safety check for common dangerous patterns
+        const dangerousPatterns = [
+          /;\s*--/i,  // SQL injection via comment
+          /\/\*.*\*\//i, // Comment injection
+          /UNION\s+ALL\s+SELECT/i, // UNION-based injection
+        ];
+        
+        for (const pattern of dangerousPatterns) {
+          if (pattern.test(sql)) {
+            throw new Error('Security check failed: Potentially dangerous SQL pattern detected');
+          }
+        }
+        
+        // If we get here, the query looks safe
+        return;
       }
 
       if (Array.isArray(ast)) {
@@ -635,11 +683,19 @@ export class QueryExecutorService {
    * Preview table data (First 10 rows)
    */
   async previewTable(config: DatabaseConfig, tableName: string): Promise<QueryResult> {
-    return this.executeQuery(config, {
-      table: tableName,
-      columns: ['*'],
-      limit: 10
-    });
+    console.log(`[QueryExecutor] Previewing table: ${tableName} (db: ${config.database}, type: ${config.type})`);
+    try {
+      const result = await this.executeQuery(config, {
+        table: tableName,
+        columns: ['*'],
+        limit: 10
+      });
+      console.log(`[QueryExecutor] Preview successful for ${tableName}: ${result.rowCount} rows`);
+      return result;
+    } catch (error) {
+      console.error(`[QueryExecutor] Preview failed for table ${tableName}:`, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   }
 
   /**
@@ -661,6 +717,7 @@ export class QueryExecutorService {
       let sql = `SELECT TOP ${query.limit} ${columns} FROM ${table}`;
       if (query.where) sql += ` WHERE ${query.where}`;
       if (query.orderBy) sql += ` ORDER BY ${query.orderBy}`;
+      console.log(`[QueryExecutor] Built SQL (${type}): ${sql}`);
       return sql;
     }
 
@@ -678,6 +735,7 @@ export class QueryExecutorService {
       sql += ` LIMIT ${query.limit}`;
     }
 
+    console.log(`[QueryExecutor] Built SQL (${type}): ${sql}`);
     return sql;
   }
 

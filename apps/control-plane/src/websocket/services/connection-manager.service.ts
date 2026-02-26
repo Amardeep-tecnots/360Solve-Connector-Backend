@@ -44,7 +44,7 @@ export class ConnectionManagerService {
       where: {
         tenantId,
         type: 'MINI',
-        status: { in: ['OFFLINE', 'ONLINE'] },
+        status: { in: ['OFFLINE', 'ONLINE', 'BUSY'] },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -66,14 +66,15 @@ export class ConnectionManagerService {
       return null;
     }
 
-    // Allow multiple connectors per tenant; avoid duplicate for same connectorId
+    // Allow reconnection for the same connector (replace stale connection)
     const existingSameConnector = Array.from(this.connections.values()).find(
       (conn) => conn.connectorId === matchedConnector!.id,
     );
 
     if (existingSameConnector) {
-      this.logger.warn(`Duplicate connection detected for connector ${matchedConnector.id}`);
-      return null;
+      this.logger.warn(`Replacing stale connection for connector ${matchedConnector.id} (old socket: ${existingSameConnector.socketId})`);
+      // Remove the old stale connection to allow reconnection
+      this.connections.delete(existingSameConnector.socketId);
     }
 
     // Store connection
