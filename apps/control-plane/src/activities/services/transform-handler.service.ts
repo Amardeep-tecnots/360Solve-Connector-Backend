@@ -1,11 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { BaseActivityHandler } from '../handlers/base-activity.handler';
 import { DataTransformService } from '../handlers/data-transform.service';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
 import { ExecutionStateService } from '../../executions/services/execution-state.service';
+import { PrismaService } from '../../prisma.service';
 
 interface TransformConfig {
-  code: string; // JavaScript function body
+  /** JavaScript transformation code */
+  code?: string;
+  /** Optional mapping ID - if provided, transformCode will be loaded from the stored mapping */
+  mappingId?: string;
   inputSchema?: Record<string, string>; // Optional type hints
 }
 
@@ -13,10 +17,12 @@ interface TransformConfig {
 export class TransformHandlerService extends BaseActivityHandler {
   constructor(
     private readonly transformService: DataTransformService,
+    private readonly prisma: PrismaService,
     stateService: ExecutionStateService,
   ) {
     super(stateService);
   }
+ REPLACE
 
   async execute(
     context: ExecutionContext,
@@ -70,10 +76,26 @@ export class TransformHandlerService extends BaseActivityHandler {
         throw new Error('Transform input has no data to process');
       }
 
+      // Resolve the transformation code: priority is config.code > mappingId > throw error
+      let transformCode = config.code;
+      
+      // If no code provided, check if mappingId is provided to load transformCode from stored mapping
+      if (!transformCode && config.mappingId) {
+        transformCode = await this.getTransformCodeFromMapping(config.mappingId, context.tenantId);
+      }
+
+      // Throw clear error if no transformation code is available
+      if (!transformCode) {
+        throw new Error(
+          'Transform activity requires transformation code. Provide either "config.code" or "config.mappingId" ' +
+          'that references a stored mapping with transformCode.'
+        );
+      }
+
       // Execute transformation
       const result = await this.transformService.transform(
         dataArray,
-        config.code,
+        transformCode,
         {
           executionId: context.executionId,
           activityId: context.activityId,
@@ -111,5 +133,42 @@ export class TransformHandlerService extends BaseActivityHandler {
       await this.logActivityComplete(context.executionId, context.activityId, result, duration);
       return result;
     }
+  }
+
+  /**
+   * Load transformCode from a stored mapping
+   */
+  private async getTransformCodeFromMapping(mappingId: string, tenantId: string): Promise<string | null> {
+    const mapping = await this.prisma.fieldMapping.findFirst({
+      where: {
+        id: mappingId,
+        tenantId,
+        isActive: true,
+      },
+      select: {
+        transformCode: true,
+        name: true,
+      },
+    });
+
+    if (!mapping) {
+      throw new NotFoundException(
+        `Mapping "${mappingId}" not found or inactive for tenant "${tenantId}"`
+      );
+    }
+
+    if (!mapping.transformCode) {
+      this.logger.warn(
+        `Mapping "${mapping.name}" (${mappingId}) has no transformCode defined. ` +
+        'The mapping may need to be regenerated with AI transformation.'
+      );
+      return null;
+    }
+
+    this.logger.log(
+      `Loaded transformCode from mapping "${mapping.name}" (${mappingId})`
+    );
+
+    return mapping.transformCode;
   }
 }

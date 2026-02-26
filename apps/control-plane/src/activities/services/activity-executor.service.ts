@@ -92,7 +92,10 @@ export class ActivityExecutorService {
         break;
 
       case 'transform':
-        if (!config.code) errors.push('code is required');
+        // Either code or mappingId must be provided
+        if (!config.code && !config.mappingId) {
+          errors.push('code or mappingId is required');
+        }
         break;
 
       case 'load':

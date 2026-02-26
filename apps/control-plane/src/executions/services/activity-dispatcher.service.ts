@@ -6,6 +6,7 @@ import {
   MiniConnectorSourceConfig,
   LoadConfig,
   ExtractConfig,
+  TransformConfig,
 } from '../../workflows/entities/workflow-definition.types';
 import { ActivityExecutorService } from '../../activities/services/activity-executor.service';
 import { CommandDispatcherService } from '../../websocket/services/command-dispatcher.service';
@@ -56,6 +57,26 @@ export class ActivityDispatcherService {
               activityConfig = {
                 ...loadConfig,
                 sourceMetadata,
+              };
+            }
+          }
+        }
+
+        // For transform activities, auto-inject mappingId if not provided but source/destination mapping exists
+        if (activity.type === 'transform') {
+          const transformConfig = activityConfig as TransformConfig;
+          if (!transformConfig.mappingId && !transformConfig.code) {
+            const mappingId = await this.findMappingForTransform(
+              executionId,
+              tenantId,
+              step,
+              workflowDefinition
+            );
+            if (mappingId) {
+              this.logger.log(`Auto-injecting mappingId into transform activity: ${mappingId}`);
+              activityConfig = {
+                ...transformConfig,
+                mappingId,
               };
             }
           }
@@ -215,5 +236,115 @@ export class ActivityDispatcherService {
       }
     }
     return Object.keys(inputs).length > 0 ? inputs : undefined;
+  }
+
+  /**
+   * Find a mapping for transform activity based on source and destination configurations.
+   * This looks for a mapping that matches the source table (from mini-connector-source or extract)
+   * and the destination SDK/method (from load activity).
+   */
+  private async findMappingForTransform(
+    executionId: string,
+    tenantId: string,
+    step: WorkflowStep,
+    workflowDefinition: WorkflowDefinition,
+  ): Promise<string | null> {
+    try {
+      // Get the Prisma service to query mappings
+      const { PrismaService } = await import('../../prisma.service');
+      const prisma = new PrismaService();
+
+      // Get source activity config (from mini-connector-source or extract)
+      let sourceTableName: string | undefined;
+      let sourceConnectorId: string | undefined;
+
+      if (step.dependsOn && step.dependsOn.length > 0) {
+        const depStep = workflowDefinition.steps.find(s => s.id === step.dependsOn[0]);
+        if (depStep) {
+          const sourceActivity = workflowDefinition.activities.find(a => a.id === depStep.activityId);
+          if (sourceActivity) {
+            if (sourceActivity.type === 'mini-connector-source') {
+              const config = sourceActivity.config as MiniConnectorSourceConfig;
+              sourceTableName = config.table;
+              sourceConnectorId = config.connectorId;
+            } else if (sourceActivity.type === 'extract') {
+              const config = sourceActivity.config as ExtractConfig;
+              sourceTableName = config.table;
+            }
+          }
+        }
+      }
+
+      // Get destination activity config (from load activity)
+      // Find the load activity that depends on this transform
+      let destInstanceId: string | undefined;
+      let destTableName: string | undefined;
+
+      const loadStep = workflowDefinition.steps.find(s => 
+        s.dependsOn?.includes(step.id) && 
+        workflowDefinition.activities.find(a => a.id === s.activityId)?.type === 'load'
+      );
+
+      if (loadStep) {
+        const loadActivity = workflowDefinition.activities.find(a => a.id === loadStep.activityId);
+        if (loadActivity) {
+          const config = loadActivity.config as LoadConfig;
+          destInstanceId = config.aggregatorInstanceId;
+          destTableName = config.table;
+        }
+      }
+
+      // If we have source and destination info, try to find a matching mapping
+      if (sourceTableName && destInstanceId) {
+        // Look for a mapping that matches source table and destination instance
+        const mapping = await prisma.fieldMapping.findFirst({
+          where: {
+            tenantId,
+            isActive: true,
+            OR: [
+              // Match by source name and destination instance
+              {
+                sourceName: sourceTableName,
+                destinationInstanceId: destInstanceId,
+              },
+              // Or match by source connector and destination instance
+              {
+                sourceConnectorId: sourceConnectorId,
+                destinationInstanceId: destInstanceId,
+              },
+            ],
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, transformCode: true },
+        });
+
+        // Only return mapping if it has transformCode
+        if (mapping && mapping.transformCode) {
+          this.logger.log(`Found mapping "${mapping.id}" for transform (source: ${sourceTableName}, dest: ${destInstanceId})`);
+          return mapping.id;
+        }
+      }
+
+      // Also try to find any active mapping with transformCode for this tenant
+      const anyMappingWithCode = await prisma.fieldMapping.findFirst({
+        where: {
+          tenantId,
+          isActive: true,
+          transformCode: { not: null },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+
+      if (anyMappingWithCode) {
+        this.logger.log(`Using fallback mapping "${anyMappingWithCode.id}" for transform`);
+        return anyMappingWithCode.id;
+      }
+
+      return null;
+    } catch (error) {
+      this.logger.warn(`Failed to find mapping for transform: ${error.message}`);
+      return null;
+    }
   }
 }

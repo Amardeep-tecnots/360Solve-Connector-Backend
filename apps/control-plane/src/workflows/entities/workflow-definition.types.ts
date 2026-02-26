@@ -53,7 +53,9 @@ export interface CloudConnectorSinkConfig {
 }
 
 export interface TransformConfig {
-  code: string;  // JavaScript function body
+  code?: string;  // JavaScript function body (optional if mappingId is provided)
+  /** Optional mapping ID - if provided, transformCode will be loaded from the stored mapping */
+  mappingId?: string;
   inputSchema?: Record<string, string>;  // Optional type hints
 }
 
