@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { StorageService } from '../storage/storage.service';
 import { PrismaService } from '../prisma.service';
 import { WasmCompilerService, SDKMethod } from './wasm-compiler.service';
-import * as vm from 'vm2';
+import { getQuickJS, QuickJSContext, isSuccess, newAsyncContext } from 'quickjs-emscripten';
 
 export interface SDKExecutionContext {
   tenantId: string;
@@ -37,27 +37,31 @@ export interface SDKInfo {
 /**
  * SDK Execution Service
  * 
- * Responsible for:
- * 1. Loading SDK code from storage
- * 2. Compiling/transpiling TypeScript to JavaScript
- * 3. Executing SDK methods in a sandboxed environment
- * 4. Returning results to activity handlers
- * 
- * This enables the generated SDK to be used internally in workflows
- * for data transfer between Mini Connector (source) and the API (destination).
+ * Uses QuickJS WASM runtime for executing SDK code
  */
 @Injectable()
 export class SDKExecutionService {
   private readonly logger = new Logger(SDKExecutionService.name);
   
-  // Cache for compiled SDKs to avoid reloading on every execution
   private readonly sdkCache: Map<string, {
     code: string;
     instance: any;
     compiledAt: Date;
   }> = new Map();
   
-  private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly CACHE_TTL_MS = 5 * 60 * 1000;
+
+  // Comprehensive list of built-in JavaScript classes to exclude
+  private readonly BUILT_IN_CLASSES = new Set([
+    'Error', 'AggregateError', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError', 'InternalError',
+    'Object', 'Array', 'Function', 'Boolean', 'Symbol', 'Number', 'BigInt', 'Math', 'Date', 'RegExp', 'Map', 'WeakMap', 'Set', 'WeakSet',
+    'Promise', 'Proxy', 'WeakRef', 'FinalizationRegistry', 'Iterator', 'AsyncIterator',
+    'ArrayBuffer', 'SharedArrayBuffer', 'Atomics', 'DataView', 'Float32Array', 'Float64Array', 'Int8Array', 'Int16Array', 'Int32Array', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'Uint8ClampedArray', 'BigInt64Array', 'BigUint64Array',
+    'JSON', 'Console', 'Navigator', 'Worker', 'XMLHttpRequest',
+    'TextEncoder', 'TextDecoder', 'URL', 'URLSearchParams',
+    'AbortController', 'AbortSignal', 'BroadcastChannel', 'CustomEvent', 'Event', 'EventTarget', 'FormData', 'Headers', 'MessageChannel', 'MessageEvent', 'MessagePort', 'Request', 'Response', 'DOMException',
+    'Blob', 'File', 'FileReader', 'ImageData', 'ImageBitmap',
+  ]);
 
   constructor(
     private readonly storage: StorageService,
@@ -65,22 +69,42 @@ export class SDKExecutionService {
     private readonly wasmCompiler: WasmCompilerService,
   ) {}
 
-  /**
-   * Get information about an SDK
-   */
-  async getSDKInfo(aggregatorId: string): Promise<SDKInfo | null> {
-    const aggregator = await this.prisma.aggregator.findUnique({
-      where: { id: aggregatorId },
-    });
-
-    if (!aggregator || !aggregator.sdkRef) {
-      return null;
+  private getPotentialClassNames(extractedMethods?: SDKMethod[]): string[] {
+    const classNames = new Set<string>();
+    if (!extractedMethods || extractedMethods.length === 0) return [];
+    for (const method of extractedMethods) {
+      if (method.name.includes('.')) {
+        const parts = method.name.split('.');
+        const potentialClassName = parts[0];
+        if (!this.BUILT_IN_CLASSES.has(potentialClassName) && /^[A-Z]/.test(potentialClassName)) {
+          classNames.add(potentialClassName);
+        }
+      }
     }
+    return Array.from(classNames);
+  }
 
-    // Download and compile to extract methods
+  private isBuiltInClass(name: string): boolean {
+    return this.BUILT_IN_CLASSES.has(name);
+  }
+
+  private extractErrorMessage(vm: QuickJSContext, error: any): string {
+    try {
+      if (!error) return 'Unknown error';
+      const dumped = vm.dump(error);
+      if (typeof dumped === 'string') return dumped;
+      if (typeof dumped === 'object') return JSON.stringify(dumped);
+      return String(dumped);
+    } catch (e) {
+      return String(error) || 'Unknown error';
+    }
+  }
+
+  async getSDKInfo(aggregatorId: string): Promise<SDKInfo | null> {
+    const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
+    if (!aggregator || !aggregator.sdkRef) return null;
     const code = await this.storage.downloadFile(aggregator.sdkRef);
     const compiled = await this.wasmCompiler.compile(code);
-
     return {
       id: aggregator.id,
       name: aggregator.name,
@@ -90,435 +114,354 @@ export class SDKExecutionService {
     };
   }
 
-  /**
-   * Execute an SDK method
-   * 
-   * This is the main entry point for using SDKs in workflow activities.
-   * The SDK code is loaded from S3, compiled, and executed in a sandbox.
-   * 
-   * Credentials are retrieved from the aggregator's stored credentials (if any),
-   * but can be overridden by the config passed in the request.
-   */
   async executeMethod(context: SDKExecutionContext): Promise<SDKExecutionResult> {
     const startTime = Date.now();
-    
     try {
       const { tenantId, aggregatorId, method, params, config } = context;
-
       this.logger.log(`Executing SDK method: ${aggregatorId}.${method}`);
-
-      // Step 1: Get stored credentials from aggregator (if any)
-      const aggregator = await this.prisma.aggregator.findUnique({
-        where: { id: aggregatorId },
-      });
-
+      const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
       const storedCredentials = (aggregator?.credentials as SDKConfig) || {};
-
-      // Step 2: Merge credentials - provided config takes precedence over stored
       const mergedConfig: SDKConfig = {
         baseUrl: config?.baseUrl || storedCredentials.baseUrl,
         apiKey: config?.apiKey || storedCredentials.apiKey,
         bearerToken: config?.bearerToken || storedCredentials.bearerToken,
         timeout: config?.timeout || storedCredentials.timeout || 30000,
       };
-
-      // Validate that we have at least a baseUrl
       if (!mergedConfig.baseUrl) {
         throw new BadRequestException('No baseUrl provided. Either pass it in config or store it in the aggregator credentials.');
       }
-
-      // Step 3: Get SDK code (from cache or storage)
       const sdkCode = await this.loadSDKCode(aggregatorId);
-
-      // Force recompile to get fresh method extraction
-      // Clear cache entry to ensure we get the latest methods
       this.sdkCache.delete(aggregatorId);
-
-      // Step 4: Compile the SDK (from cache or compile)
       const compiled = await this.compileSDK(aggregatorId, sdkCode);
-
-      // Log extracted methods for debugging
       this.logger.debug(`Extracted SDK methods: ${JSON.stringify(compiled.methods?.map(m => m.name) || [])}`);
-
-      if (!compiled.jsCode) {
-        throw new BadRequestException('Failed to compile SDK');
-      }
-
-      // Step 5: Validate the code is safe
+      if (!compiled.jsCode) throw new BadRequestException('Failed to compile SDK');
       const validation = this.wasmCompiler.validateCode(compiled.jsCode);
-      if (!validation.valid) {
-        throw new BadRequestException(`SDK code validation failed: ${validation.errors?.join(', ')}`);
-      }
-
-      // Step 6: Execute the method in sandbox with merged credentials and extracted methods
-      const result = await this.executeInSandbox(
-        compiled.jsCode,
-        method,
-        params,
-        mergedConfig,
-        compiled.methods
-      );
-
+      if (!validation.valid) throw new BadRequestException(`SDK code validation failed: ${validation.errors?.join(', ')}`);
+      const result = await this.executeInSandbox(compiled.jsCode, method, params, mergedConfig, compiled.methods);
       const executionTimeMs = Date.now() - startTime;
-      
       this.logger.log(`SDK method executed successfully in ${executionTimeMs}ms`);
-
-      return {
-        success: true,
-        data: result,
-        executionTimeMs,
-      };
-
+      return { success: true, data: result, executionTimeMs };
     } catch (error: any) {
       const executionTimeMs = Date.now() - startTime;
       this.logger.error(`SDK execution failed: ${error.message}`, error.stack);
-
-      return {
-        success: false,
-        error: error.message,
-        executionTimeMs,
-      };
+      return { success: false, error: error.message, executionTimeMs };
     }
   }
 
-  /**
-   * Load SDK code from storage or cache
-   */
   private async loadSDKCode(aggregatorId: string): Promise<string> {
-    // Check cache first
     const cached = this.sdkCache.get(aggregatorId);
     if (cached && Date.now() - cached.compiledAt.getTime() < this.CACHE_TTL_MS) {
       this.logger.debug(`Using cached SDK for ${aggregatorId}`);
       return cached.code;
     }
-
-    // Load from storage
-    const aggregator = await this.prisma.aggregator.findUnique({
-      where: { id: aggregatorId },
-    });
-
-    if (!aggregator || !aggregator.sdkRef) {
-      throw new BadRequestException(`SDK not found for aggregator: ${aggregatorId}`);
-    }
-
+    const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
+    if (!aggregator || !aggregator.sdkRef) throw new BadRequestException(`SDK not found for aggregator: ${aggregatorId}`);
     const code = await this.storage.downloadFile(aggregator.sdkRef);
-    
-    // Update cache
-    this.sdkCache.set(aggregatorId, {
-      code,
-      instance: null,
-      compiledAt: new Date(),
-    });
-
+    this.sdkCache.set(aggregatorId, { code, instance: null, compiledAt: new Date() });
     return code;
   }
 
-  /**
-   * Compile SDK code
-   */
-  private async compileSDK(aggregatorId: string, code: string): Promise<{
-    jsCode?: string;
-    methods?: SDKMethod[];
-  }> {
+  private async compileSDK(aggregatorId: string, code: string): Promise<{ jsCode?: string; methods?: SDKMethod[] }> {
     const cached = this.sdkCache.get(aggregatorId);
-    
-    // Already compiled?
-    if (cached?.instance) {
-      return cached.instance;
-    }
-
-    // Compile
+    if (cached?.instance) return cached.instance;
     const result = await this.wasmCompiler.compile(code);
-    
-    // Update cache
-    this.sdkCache.set(aggregatorId, {
-      code,
-      instance: result,
-      compiledAt: new Date(),
-    });
-
+    this.sdkCache.set(aggregatorId, { code, instance: result, compiledAt: new Date() });
     return result;
   }
 
-  /**
-   * Execute SDK method in a sandboxed environment
-   * 
-   * Uses VM2 for security - provides isolation from the host system.
-   * The SDK runs with limited permissions and cannot access:
-   * - File system
-   * - Child processes
-   * - Network (except for defined endpoints)
-   */
-  private async executeInSandbox(
-    jsCode: string,
-    methodName: string,
-    params: Record<string, any>,
-    config?: SDKConfig,
-    extractedMethods?: SDKMethod[]
-  ): Promise<any> {
-    return new Promise((resolve, reject) => {
-      try {
-        // Create a sandbox with the SDK code
-        const sandbox = {
-          // SDK will be loaded here
-          __sdk_exports: null,
-          __sdk_instance: null,
-          __sdk_class_name: null,
-          
-          // Console for debugging
-          console: {
-            log: (...args: any[]) => this.logger.debug(args.join(' ')),
-            error: (...args: any[]) => this.logger.error(args.join(' ')),
-            warn: (...args: any[]) => this.logger.warn(args.join(' ')),
-          },
-          
-          // Math and basic utilities
-          Math,
-          Date,
-          JSON,
-          Array,
-          Object,
-          String,
-          Number,
-          Boolean,
-          Map,
-          Set,
-          Promise,
-          
-          // Fetch for HTTP requests (with restrictions)
-          fetch: async (url: string, options?: any) => {
-            // Debug log the fetch attempt
-            this.logger.debug(`[FETCH] Attempting request to: ${url}`);
-            this.logger.debug(`[FETCH] Config baseUrl: ${config?.baseUrl || 'NOT SET'}`);
-            this.logger.debug(`[FETCH] Config apiKey: ${config?.apiKey ? 'SET' : 'NOT SET'}`);
-            this.logger.debug(`[FETCH] Config bearerToken: ${config?.bearerToken ? 'SET' : 'NOT SET'}`);
-            
-            // Validate URL is allowed
-            if (config?.baseUrl && !url.startsWith(config.baseUrl)) {
-              const errorMsg = `URL not allowed: ${url}. Must start with ${config.baseUrl}`;
-              this.logger.error(`[FETCH] ${errorMsg}`);
-              throw new Error(errorMsg);
-            }
-            
-            // Add authentication headers
-            const headers = new Headers(options?.headers || {});
-            if (config?.apiKey) {
-              headers.set('X-API-Key', config.apiKey);
-              this.logger.debug(`[FETCH] Set X-API-Key header`);
-            }
-            if (config?.bearerToken) {
-              headers.set('Authorization', `Bearer ${config.bearerToken}`);
-              this.logger.debug(`[FETCH] Set Authorization header`);
-            }
-            
-            // Apply timeout
-            const timeout = config?.timeout || 30000;
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), timeout);
-            
-            try {
-              this.logger.debug(`[FETCH] Sending request to ${url} with method ${options?.method || 'GET'}`);
-              const response = await fetch(url, {
-                ...options,
-                headers,
-                signal: controller.signal,
-              });
-              clearTimeout(timeoutId);
-              this.logger.debug(`[FETCH] Response status: ${response.status} ${response.statusText}`);
-              
-              // Return response data
-              return {
-                ok: response.ok,
-                status: response.status,
-                statusText: response.statusText,
-                json: () => response.json(),
-                text: () => response.text(),
-              };
-            } catch (error: any) {
-              clearTimeout(timeoutId);
-              this.logger.error(`[FETCH] Request failed: ${error.message}`);
-              if (error.name === 'AbortError') {
-                throw new Error(`Request timeout after ${timeout}ms`);
-              }
-              throw error;
-            }
-          },
-        };
-
-        // Create VM2 script that properly exports the SDK class and instance
-        // Use a simpler pattern that's compatible with VM2's transformer
-        const script = new vm.VMScript(`
-          // Load the SDK code
-          ${jsCode}
-          
-          // Find the SDK class
-          let __sdk_class = null;
-          let __sdk_class_name = null;
-          
-          // First, try to find the class in exports
-          for (const key in exports) {
-            if (typeof exports[key] === 'function' && /^[A-Z]/.test(key) && key.charAt(0) !== '_') {
-              __sdk_class = exports[key];
-              __sdk_class_name = key;
-              break;
-            }
-          }
-          
-          // If no class found in exports, try global/this
-          if (!__sdk_class) {
-            for (var key in this) {
-              if (typeof this[key] === 'function' && 
-                  /^[A-Z]/.test(key) && 
-                  key.charAt(0) !== '_') {
-                __sdk_class = this[key];
-                __sdk_class_name = key;
-                break;
-              }
-            }
-          }
-          
-          // Set up exports for the class and class name
-          exports.__sdk_class_name__ = __sdk_class_name;
-          
-          // Create a function to instantiate the class
-          exports.createSdkInstance = function(config) {
-            if (!__sdk_class) return null;
-            try {
-              return new __sdk_class(config);
-            } catch (e) {
-              try {
-                return __sdk_class(config);
-              } catch (e2) {
-                return null;
-              }
-            }
-          };
-        `);
-
-        // Create VM context using NodeVM with relaxed settings for network access
-        // Using type assertion to access additional options not in type definitions
-        const NodeVM = vm.NodeVM as any;
-        const vmContext = new NodeVM({
-          sandbox,
-          timeout: config?.timeout || 30000,
-          console: 'inherit',
-          eval: false,
-          wasm: false,
-          require: {
-            external: true,
-            builtin: ['fetch'],
-          },
-        });
-
-        // Run the script
-        const sdkExport = vmContext.run(script);
-        
-        if (!sdkExport || !sdkExport.createSdkInstance) {
-          throw new Error('Failed to load SDK - no class found in code');
-        }
-
-        const sdkClassName = sdkExport.__sdk_class_name__ || 'Unknown';
-        this.logger.debug(`SDK class name: ${sdkClassName}`);
-        
-        // Create instance with config
-        const sdkInstance = sdkExport.createSdkInstance(config || {});
-        
-        if (!sdkInstance) {
-          throw new Error(`Failed to instantiate SDK class: ${sdkClassName}`);
-        }
-
-        // Check if method exists directly on instance
-        let actualMethodName = methodName;
-        
-        if (typeof sdkInstance[methodName] !== 'function') {
-          // Method not found directly, try fuzzy matching using extracted methods
-          if (extractedMethods && extractedMethods.length > 0) {
-            this.logger.debug(`Method '${methodName}' not found directly, trying extracted methods`);
-            
-            // Try to find method with ClassName.methodName format
-            const matchingMethod = extractedMethods.find(m => 
-              m.name === methodName || 
-              m.name === `${sdkClassName}.${methodName}` ||
-              m.name.endsWith(`.${methodName}`)
-            );
-            
-            if (matchingMethod) {
-              // Extract just the method name from the full name
-              const parts = matchingMethod.name.split('.');
-              actualMethodName = parts[parts.length - 1];
-              this.logger.debug(`Matched method '${methodName}' to '${actualMethodName}'`);
-            }
-          }
-          
-          // Final check
-          if (typeof sdkInstance[actualMethodName] !== 'function') {
-            const availableMethods = Object.keys(sdkInstance).filter(k => typeof sdkInstance[k] === 'function');
-            const extractedMethodNames = extractedMethods?.map(m => m.name) || [];
-            
-            throw new Error(
-              `Method '${methodName}' not found on SDK. ` +
-              `Available instance methods: ${availableMethods.join(', ')}. ` +
-              `Extracted methods: ${extractedMethodNames.join(', ')}`
-            );
-          }
-        }
-
-        // Execute the method
-        const methodResult = sdkInstance[actualMethodName](params);
-        
-        // Handle Promise results
-        if (methodResult instanceof Promise) {
-          methodResult
-            .then(resolve)
-            .catch(reject);
-        } else {
-          resolve(methodResult);
-        }
-
-      } catch (error: any) {
-        reject(error);
-      }
-    });
+  private getValueFromResult<T>(vm: QuickJSContext, result: { value?: T; error?: any }): T {
+    if (result.error) throw new Error(`QuickJS error: ${this.extractErrorMessage(vm, result.error)}`);
+    return result.value as T;
   }
 
-  /**
-   * List all available SDKs for a tenant
-   */
+  private findSdkClassInGlobals(vm: QuickJSContext, potentialClassNames: string[]): { name: string; handle: any } | null {
+    const keysResult = vm.evalCode(`Object.keys(this)`);
+    if (!isSuccess(keysResult)) return null;
+    const globalKeys = vm.dump(keysResult.value) as string[];
+    
+    for (const className of potentialClassNames) {
+      if (globalKeys.includes(className)) {
+        const handle = vm.getProp(vm.global, className);
+        if (handle && !this.isBuiltInClass(className)) {
+          this.logger.debug(`Found SDK class from extracted methods: ${className}`);
+          return { name: className, handle };
+        }
+      }
+    }
+    
+    for (const key of globalKeys) {
+      if (this.isBuiltInClass(key) || !/^[A-Z]/.test(key)) continue;
+      const handle = vm.getProp(vm.global, key);
+      if (handle) {
+        const typeResult = vm.evalCode(`Object.prototype.toString.call(this.${key})`);
+        if (isSuccess(typeResult)) {
+          const typeStr = vm.dump(typeResult.value) as string;
+          if (typeStr === '[object Function]') {
+            this.logger.debug(`Found SDK class from globals: ${key}`);
+            return { name: key, handle };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private async executeInSandbox(jsCode: string, methodName: string, params: Record<string, any>, config?: SDKConfig, extractedMethods?: SDKMethod[]): Promise<any> {
+    const ctx = await newAsyncContext();
+    const vm = ctx;
+    
+    try {
+      // Setup config
+      const configStr = JSON.stringify(config || {});
+      const configResult = vm.evalCode(`JSON.parse(${JSON.stringify(configStr)})`);
+      const configHandle = this.getValueFromResult(vm, configResult);
+      vm.setProp(vm.global, 'config', configHandle);
+
+      const fetchConfig = config;
+
+      // Create fetch wrapper
+      const fetchWrapper = vm.newAsyncifiedFunction('fetch', async (urlHandle: any, optionsHandle: any) => {
+        const url = vm.getString(urlHandle) || String(urlHandle);
+        this.logger.debug(`[QuickJS Fetch] Request to: ${url}`);
+        if (fetchConfig?.baseUrl && !url.startsWith(fetchConfig.baseUrl)) {
+          return vm.newError(`URL not allowed: ${url}. Must start with ${fetchConfig.baseUrl}`);
+        }
+        let options: any = {};
+        if (optionsHandle) { try { options = vm.dump(optionsHandle); } catch {} }
+        const headers = new Headers(options?.headers || {});
+        if (fetchConfig?.apiKey) headers.set('X-API-Key', fetchConfig.apiKey);
+        if (fetchConfig?.bearerToken) headers.set('Authorization', `Bearer ${fetchConfig.bearerToken}`);
+        try {
+          const response = await fetch(url, { ...options, headers });
+          const responseObj = vm.newObject();
+          vm.setProp(responseObj, 'ok', vm.newNumber(response.ok ? 1 : 0));
+          vm.setProp(responseObj, 'status', vm.newNumber(response.status));
+          vm.setProp(responseObj, 'statusText', vm.newString(response.statusText));
+          const jsonMethod = vm.newAsyncifiedFunction('json', async () => {
+            const data = await response.json();
+            const parseResult = vm.evalCode(`JSON.parse(${JSON.stringify(JSON.stringify(data))})`);
+            if (isSuccess(parseResult)) return parseResult.value;
+            return vm.newString(JSON.stringify(data));
+          });
+          vm.setProp(responseObj, 'json', jsonMethod);
+          const textMethod = vm.newAsyncifiedFunction('text', async () => vm.newString(await response.text()));
+          vm.setProp(responseObj, 'text', textMethod);
+          return responseObj;
+        } catch (error: any) {
+          return vm.newError(error.message);
+        }
+      });
+      vm.setProp(vm.global, 'fetch', fetchWrapper);
+
+      // Setup console
+      const consoleResult = vm.evalCode(`({ log: () => {}, error: () => {}, warn: () => {} })`);
+      if (isSuccess(consoleResult)) vm.setProp(vm.global, 'console', consoleResult.value);
+
+      // Setup common globals
+      const globals = ['Math', 'Date', 'JSON', 'Array', 'Object', 'String', 'Number', 'Boolean', 'Map', 'Set', 'Promise'];
+      for (const g of globals) {
+        const result = vm.evalCode(g);
+        if (isSuccess(result)) vm.setProp(vm.global, g, result.value);
+      }
+
+      // Get potential class names BEFORE evaluating the code
+      const potentialClassNames = this.getPotentialClassNames(extractedMethods);
+      this.logger.debug(`Looking for SDK class. Potential names from methods: ${potentialClassNames.join(', ')}`);
+
+      // Load SDK code - with ModuleKind.None, classes are defined directly in global scope
+      this.logger.debug('Loading SDK code into QuickJS...');
+      
+      let evalResult = vm.evalCode(jsCode);
+      
+      if (!isSuccess(evalResult)) {
+        const errorMsg = this.extractErrorMessage(vm, evalResult.error);
+        this.logger.error(`QuickJS eval error: ${errorMsg}`);
+        throw new Error(`Failed to load SDK code: ${errorMsg}`);
+      }
+
+      // Check for class in global scope
+      let sdkClassName: string | null = null;
+      let sdkClassHandle: any = null;
+
+      // First try the potential class names from extracted methods
+      const foundFromMethods = this.findSdkClassInGlobals(vm, potentialClassNames);
+      if (foundFromMethods) {
+        sdkClassName = foundFromMethods.name;
+        sdkClassHandle = foundFromMethods.handle;
+      }
+
+      // If not found, try exports
+      if (!sdkClassName) {
+        try {
+          const exportsResult = vm.getProp(vm.global, 'exports');
+          if (exportsResult) {
+            const exportsKeys = vm.evalCode(`Object.keys(exports)`);
+            if (isSuccess(exportsKeys)) {
+              const exportKeys = vm.dump(exportsKeys.value) as string[];
+              for (const key of exportKeys) {
+                if (!this.isBuiltInClass(key) && /^[A-Z]/.test(key)) {
+                  const prop = vm.getProp(exportsResult, key);
+                  if (prop) {
+                    // Expose to global
+                    vm.setProp(vm.global, key, prop);
+                    sdkClassName = key;
+                    sdkClassHandle = prop;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) { this.logger.debug('No exports found'); }
+      }
+
+      // If still not found, try default export
+      if (!sdkClassName) {
+        try {
+          const defaultExport = vm.getProp(vm.global, 'default');
+          if (defaultExport) {
+            const typeResult = vm.evalCode('typeof default');
+            if (isSuccess(typeResult) && vm.dump(typeResult.value) === 'function') {
+              vm.setProp(vm.global, 'default', defaultExport);
+              sdkClassName = 'default';
+              sdkClassHandle = defaultExport;
+            }
+          }
+        } catch (e) { this.logger.debug('No default export found'); }
+      }
+
+      // Last resort: try scanning for class in code itself
+      if (!sdkClassName && potentialClassNames.length > 0) {
+        // Try to get the class from module scope by evaluating with export
+        for (const className of potentialClassNames) {
+          try {
+            const testResult = vm.evalCode(`${className}`);
+            if (isSuccess(testResult)) {
+              const type = vm.dump(testResult.value);
+              if (type === 'function') {
+                const handle = vm.getProp(vm.global, className);
+                if (handle) {
+                  sdkClassName = className;
+                  sdkClassHandle = handle;
+                  break;
+                }
+              }
+            }
+          } catch (e) { /* try next */ }
+        }
+        
+        // If still not found, try adding the class to global by evaluating assignment
+        if (!sdkClassName) {
+          for (const className of potentialClassNames) {
+            try {
+              // Try to access the class from module scope
+              const accessCode = `typeof ${className}`;
+              const accessResult = vm.evalCode(accessCode);
+              if (isSuccess(accessResult)) {
+                const type = vm.dump(accessResult.value);
+                if (type === 'function') {
+                  // It's a function/class - try to expose it
+                  const exposeCode = `this.${className} = ${className}`;
+                  vm.evalCode(exposeCode);
+                  
+                  const handle = vm.getProp(vm.global, className);
+                  if (handle) {
+                    sdkClassName = className;
+                    sdkClassHandle = handle;
+                    break;
+                  }
+                }
+              }
+            } catch (e) { /* try next */ }
+          }
+        }
+      }
+
+      if (!sdkClassName) {
+        const debugResult = vm.evalCode(`Object.keys(this)`);
+        const debugKeys = isSuccess(debugResult) ? vm.dump(debugResult.value) as string[] : [];
+        const methodNames = extractedMethods?.map(m => m.name).join(', ') || 'none';
+        this.logger.error(`Could not find SDK class. Global keys: ${debugKeys.join(', ')}`);
+        this.logger.error(`Extracted methods: ${methodNames}`);
+        throw new Error(`Could not find SDK class. Tried: ${potentialClassNames.join(', ')}`);
+      }
+
+      this.logger.debug(`Found SDK class: ${sdkClassName}`);
+
+      // Create config object and instantiate
+      const configObjStr = JSON.stringify({ baseUrl: config?.baseUrl, apiKey: config?.apiKey, bearerToken: config?.bearerToken, timeout: config?.timeout });
+      const configHandleResult = vm.evalCode(`JSON.parse(${JSON.stringify(configObjStr)})`);
+      const configObjHandle = this.getValueFromResult(vm, configHandleResult);
+
+      let instanceHandle: any;
+      const constructorResult = vm.evalCode(`new ${sdkClassName}(${configObjStr})`);
+      if (!isSuccess(constructorResult)) {
+        throw new Error(`Failed to instantiate SDK: ${this.extractErrorMessage(vm, constructorResult.error)}`);
+      }
+      instanceHandle = constructorResult.value;
+
+      // Find and call method
+      let actualMethodName = methodName;
+      const methodProp = vm.getProp(instanceHandle, methodName);
+      if (!methodProp) {
+        if (extractedMethods && extractedMethods.length > 0) {
+          const matchingMethod = extractedMethods.find(m => m.name === methodName || m.name === `${sdkClassName}.${methodName}` || m.name.endsWith(`.${methodName}`));
+          if (matchingMethod) {
+            const parts = matchingMethod.name.split('.');
+            actualMethodName = parts[parts.length - 1];
+          }
+        }
+        const finalMethodProp = vm.getProp(instanceHandle, actualMethodName);
+        if (!finalMethodProp) {
+          throw new Error(`Method '${methodName}' not found. Available: ${extractedMethods?.map(m => m.name).join(', ')}`);
+        }
+      }
+
+      this.logger.debug(`Calling method: ${actualMethodName}`);
+      const paramsStr = JSON.stringify(params || {});
+      const paramsHandleResult = vm.evalCode(`JSON.parse(${JSON.stringify(paramsStr)})`);
+      const paramsHandle = this.getValueFromResult(vm, paramsHandleResult);
+      
+      const methodResult = vm.callFunction(vm.getProp(instanceHandle, actualMethodName), instanceHandle, paramsHandle);
+      if (!isSuccess(methodResult)) {
+        throw new Error(`SDK method failed: ${this.extractErrorMessage(vm, methodResult.error)}`);
+      }
+
+      const resultValue = methodResult.value;
+      
+      // QuickJS handles async through asyncified functions (like fetch)
+      // Just dump the result - if it's a promise, the SDK should use asyncified methods
+      const result = vm.dump(resultValue);
+      await ctx.dispose();
+      return result;
+    } catch (error: any) {
+      this.logger.error(`QuickJS execution error: ${error.message}`, error.stack);
+      try { await ctx.dispose(); } catch {}
+      throw error;
+    }
+  }
+
   async listSDKs(tenantId: string): Promise<SDKInfo[]> {
     const aggregators = await this.prisma.aggregator.findMany({
-      where: {
-        tenantId,
-        sdkRef: { not: null },
-      },
-      select: {
-        id: true,
-        name: true,
-        createdAt: true,
-        configSchema: true,
-      },
+      where: { tenantId, sdkRef: { not: null } },
+      select: { id: true, name: true, createdAt: true, configSchema: true },
     });
-
     const sdkInfos: SDKInfo[] = [];
-    
     for (const agg of aggregators) {
       try {
         const info = await this.getSDKInfo(agg.id);
-        if (info) {
-          sdkInfos.push(info);
-        }
+        if (info) sdkInfos.push(info);
       } catch (error) {
         this.logger.warn(`Failed to get SDK info for ${agg.id}: ${error}`);
       }
     }
-
     return sdkInfos;
   }
 
-  /**
-   * Clear SDK cache (useful for development)
-   */
   clearCache(): void {
     this.sdkCache.clear();
     this.logger.log('SDK cache cleared');
   }
 }
+
+
