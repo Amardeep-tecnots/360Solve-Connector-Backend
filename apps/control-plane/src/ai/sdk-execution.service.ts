@@ -287,18 +287,28 @@ export class SDKExecutionService {
           
           // Fetch for HTTP requests (with restrictions)
           fetch: async (url: string, options?: any) => {
+            // Debug log the fetch attempt
+            this.logger.debug(`[FETCH] Attempting request to: ${url}`);
+            this.logger.debug(`[FETCH] Config baseUrl: ${config?.baseUrl || 'NOT SET'}`);
+            this.logger.debug(`[FETCH] Config apiKey: ${config?.apiKey ? 'SET' : 'NOT SET'}`);
+            this.logger.debug(`[FETCH] Config bearerToken: ${config?.bearerToken ? 'SET' : 'NOT SET'}`);
+            
             // Validate URL is allowed
             if (config?.baseUrl && !url.startsWith(config.baseUrl)) {
-              throw new Error(`URL not allowed: ${url}. Must start with ${config.baseUrl}`);
+              const errorMsg = `URL not allowed: ${url}. Must start with ${config.baseUrl}`;
+              this.logger.error(`[FETCH] ${errorMsg}`);
+              throw new Error(errorMsg);
             }
             
             // Add authentication headers
             const headers = new Headers(options?.headers || {});
             if (config?.apiKey) {
               headers.set('X-API-Key', config.apiKey);
+              this.logger.debug(`[FETCH] Set X-API-Key header`);
             }
             if (config?.bearerToken) {
               headers.set('Authorization', `Bearer ${config.bearerToken}`);
+              this.logger.debug(`[FETCH] Set Authorization header`);
             }
             
             // Apply timeout
@@ -307,12 +317,14 @@ export class SDKExecutionService {
             const timeoutId = setTimeout(() => controller.abort(), timeout);
             
             try {
+              this.logger.debug(`[FETCH] Sending request to ${url} with method ${options?.method || 'GET'}`);
               const response = await fetch(url, {
                 ...options,
                 headers,
                 signal: controller.signal,
               });
               clearTimeout(timeoutId);
+              this.logger.debug(`[FETCH] Response status: ${response.status} ${response.statusText}`);
               
               // Return response data
               return {
@@ -324,6 +336,7 @@ export class SDKExecutionService {
               };
             } catch (error: any) {
               clearTimeout(timeoutId);
+              this.logger.error(`[FETCH] Request failed: ${error.message}`);
               if (error.name === 'AbortError') {
                 throw new Error(`Request timeout after ${timeout}ms`);
               }
@@ -333,17 +346,18 @@ export class SDKExecutionService {
         };
 
         // Create VM2 script that properly exports the SDK class and instance
+        // Use a simpler pattern that's compatible with VM2's transformer
         const script = new vm.VMScript(`
           // Load the SDK code
           ${jsCode}
           
-          // Find and export the SDK class (not instance)
+          // Find the SDK class
           let __sdk_class = null;
           let __sdk_class_name = null;
           
           // First, try to find the class in exports
-          for (const key of Object.keys(exports || {})) {
-            if (typeof exports[key] === 'function' && /^[A-Z]/.test(key) && !key.startsWith('_')) {
+          for (const key in exports) {
+            if (typeof exports[key] === 'function' && /^[A-Z]/.test(key) && key.charAt(0) !== '_') {
               __sdk_class = exports[key];
               __sdk_class_name = key;
               break;
@@ -352,10 +366,10 @@ export class SDKExecutionService {
           
           // If no class found in exports, try global/this
           if (!__sdk_class) {
-            for (const key of Object.keys(this)) {
+            for (var key in this) {
               if (typeof this[key] === 'function' && 
                   /^[A-Z]/.test(key) && 
-                  !key.startsWith('_')) {
+                  key.charAt(0) !== '_') {
                 __sdk_class = this[key];
                 __sdk_class_name = key;
                 break;
@@ -363,47 +377,54 @@ export class SDKExecutionService {
             }
           }
           
-          // Export both class name and a function to create instance
-          {
-            className: __sdk_class_name,
-            createInstance: function(config) {
-              if (!__sdk_class) return null;
+          // Set up exports for the class and class name
+          exports.__sdk_class_name__ = __sdk_class_name;
+          
+          // Create a function to instantiate the class
+          exports.createSdkInstance = function(config) {
+            if (!__sdk_class) return null;
+            try {
+              return new __sdk_class(config);
+            } catch (e) {
               try {
-                return new __sdk_class(config);
-              } catch (e) {
-                try {
-                  return __sdk_class(config);
-                } catch (e2) {
-                  return null;
-                }
+                return __sdk_class(config);
+              } catch (e2) {
+                return null;
               }
             }
-          }
+          };
         `);
 
-        // Create VM context
-        const vmContext = new vm.NodeVM({
+        // Create VM context using NodeVM with relaxed settings for network access
+        // Using type assertion to access additional options not in type definitions
+        const NodeVM = vm.NodeVM as any;
+        const vmContext = new NodeVM({
           sandbox,
           timeout: config?.timeout || 30000,
           console: 'inherit',
           eval: false,
           wasm: false,
+          require: {
+            external: true,
+            builtin: ['fetch'],
+          },
         });
 
         // Run the script
         const sdkExport = vmContext.run(script);
         
-        if (!sdkExport || !sdkExport.createInstance) {
+        if (!sdkExport || !sdkExport.createSdkInstance) {
           throw new Error('Failed to load SDK - no class found in code');
         }
 
-        this.logger.debug(`SDK class name: ${sdkExport.className}`);
+        const sdkClassName = sdkExport.__sdk_class_name__ || 'Unknown';
+        this.logger.debug(`SDK class name: ${sdkClassName}`);
         
         // Create instance with config
-        const sdkInstance = sdkExport.createInstance(config || {});
+        const sdkInstance = sdkExport.createSdkInstance(config || {});
         
         if (!sdkInstance) {
-          throw new Error(`Failed to instantiate SDK class: ${sdkExport.className}`);
+          throw new Error(`Failed to instantiate SDK class: ${sdkClassName}`);
         }
 
         // Check if method exists directly on instance
@@ -417,7 +438,7 @@ export class SDKExecutionService {
             // Try to find method with ClassName.methodName format
             const matchingMethod = extractedMethods.find(m => 
               m.name === methodName || 
-              m.name === `${sdkExport.className}.${methodName}` ||
+              m.name === `${sdkClassName}.${methodName}` ||
               m.name.endsWith(`.${methodName}`)
             );
             
