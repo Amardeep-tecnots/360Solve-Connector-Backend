@@ -4,9 +4,12 @@ import { ConnectorClientService } from '../handlers/connector-client.service';
 import { ExecutionContext, ActivityExecutionResult } from '../entities/activity-result.types';
 import { ExecutionStateService } from '../../executions/services/execution-state.service';
 import { PrismaService } from '../../prisma.service';
+import { SDKExecutionService, SDKConfig } from '../../ai/sdk-execution.service';
 
 interface LoadConfig {
-  aggregatorInstanceId: string;
+  aggregatorInstanceId?: string;
+  /** SDK ID for AI SDK loads - used when loading to AI SDK endpoints */
+  sdkId?: string;
   table?: string;
   mode: 'insert' | 'upsert' | 'create';
   conflictKey?: string | string[];
@@ -27,6 +30,18 @@ interface LoadConfig {
     tableName?: string;
     columns?: string[];
   };
+  /**
+   * SDK-specific configuration for AI SDK aggregators
+   */
+  sdkMethod?: string;
+  /** Alternative to sdkMethod - used as fallback when sdkMethod is not provided */
+  method?: string;
+  sdkConfig?: {
+    baseUrl?: string;
+    apiKey?: string;
+    bearerToken?: string;
+    timeout?: number;
+  };
 }
 
 @Injectable()
@@ -34,6 +49,7 @@ export class LoadHandlerService extends BaseActivityHandler {
   constructor(
     private readonly connectorClient: ConnectorClientService,
     private readonly prisma: PrismaService,
+    private readonly sdkExecutionService: SDKExecutionService,
     stateService: ExecutionStateService,
   ) {
     super(stateService);
@@ -72,9 +88,39 @@ export class LoadHandlerService extends BaseActivityHandler {
         throw new Error('Load input must be an array');
       }
 
+      // DEBUG: Log config details
+      this.logger.log(`[LOAD DEBUG] aggregatorInstanceId: ${config.aggregatorInstanceId}`);
+      this.logger.log(`[LOAD DEBUG] sdkId: ${config.sdkId}`);
+
+      // Check if this is an AI SDK load via sdkId
+      const isSDK = this.isSDKLoad(config);
+      
+      this.logger.log(`[LOAD DEBUG] isSDKLoad result: ${isSDK}`);
+
+      if (isSDK) {
+        // Handle AI SDK load - call SDK method to send data to external API
+        return await this.executeSDKLoad(
+          inputData,
+          config,
+          context,
+          startTime
+        );
+      }
+
+      // For non-SDK loads, we need an aggregator instance
+      if (!config.aggregatorInstanceId) {
+        throw new Error('aggregatorInstanceId is required for database load');
+      }
+
       // Get aggregator instance
       const instance = await this.getInstance(config.aggregatorInstanceId, context.tenantId);
 
+      // DEBUG: Log aggregator details
+      this.logger.log(`[LOAD DEBUG] aggregatorId from instance: ${instance.aggregatorId}`);
+      this.logger.log(`[LOAD DEBUG] aggregatorName: ${instance.aggregator?.name}`);
+      this.logger.log(`[LOAD DEBUG] aggregatorCategory: ${instance.aggregator?.category}`);
+
+      // Handle database load (original behavior)
       // Resolve the actual table name - this is the key fix for the "undefined" bug
       const resolvedTableName = this.resolveTableName(config, inputData);
       
@@ -155,6 +201,115 @@ export class LoadHandlerService extends BaseActivityHandler {
       await this.logActivityComplete(context.executionId, context.activityId, result, duration);
       return result;
     }
+  }
+
+  /**
+   * Check if this is an SDK load
+   * Checks:
+   * 1. If sdkId starts with "sdk-"
+   * 2. If aggregatorInstanceId starts with "sdk-"
+   */
+  private isSDKLoad(config: LoadConfig): boolean {
+    // Check sdkId first (primary for AI SDK loads)
+    if (config.sdkId && config.sdkId.startsWith('sdk-')) {
+      this.logger.log(`[LOAD DEBUG] SDK detected via sdkId: ${config.sdkId}`);
+      return true;
+    }
+
+    // Check aggregatorInstanceId
+    if (config.aggregatorInstanceId && config.aggregatorInstanceId.startsWith('sdk-')) {
+      this.logger.log(`[LOAD DEBUG] SDK detected via aggregatorInstanceId: ${config.aggregatorInstanceId}`);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Execute load using AI SDK - sends data to external API
+   */
+  private async executeSDKLoad(
+    inputData: any[],
+    config: LoadConfig,
+    context: ExecutionContext,
+    startTime: number
+  ): Promise<ActivityExecutionResult> {
+    // Use sdkId or aggregatorInstanceId as the aggregatorId
+    const sdkId = config.sdkId || config.aggregatorInstanceId;
+    // Priority: sdkMethod > method > default 'create'
+    const method = config.sdkMethod || config.method || 'create';
+    const batchSize = config.batchSize || 100;
+    
+    this.logger.log(`[LOAD DEBUG] SDK method resolution: sdkMethod=${config.sdkMethod}, method=${config.method}, final=${method}`);
+
+    this.logger.log(`Executing SDK load: ${sdkId}.${method} with ${inputData.length} rows`);
+
+    let totalLoaded = 0;
+    const errors: any[] = [];
+
+    // Process data in batches
+    for (let i = 0; i < inputData.length; i += batchSize) {
+      const batch = inputData.slice(i, i + batchSize);
+
+      try {
+        // Prepare SDK params - wrap data in appropriate format
+        const sdkParams = {
+          data: batch,
+          table: config.table,
+        };
+
+        // Execute SDK method
+        const sdkResult = await this.sdkExecutionService.executeMethod({
+          tenantId: context.tenantId,
+          aggregatorId: sdkId,
+          method,
+          params: sdkParams,
+          config: config.sdkConfig as SDKConfig,
+        });
+
+        if (!sdkResult.success) {
+          errors.push({
+            batch: Math.floor(i / batchSize) + 1,
+            error: sdkResult.error,
+          });
+        } else {
+          // Count successful records - use returned count or assume all
+          const rowsInBatch = batch.length;
+          totalLoaded += rowsInBatch;
+        }
+      } catch (error: any) {
+        errors.push({
+          batch: Math.floor(i / batchSize) + 1,
+          error: error.message,
+        });
+      }
+    }
+
+    const duration = Date.now() - startTime;
+
+    const activityResult: ActivityExecutionResult = {
+      success: errors.length === 0,
+      data: {
+        rowsProcessed: inputData.length,
+        rowsLoaded: totalLoaded,
+        rowsFailed: errors.length,
+      },
+      error: errors.length > 0 ? {
+        code: 'SDK_LOAD_PARTIAL_FAILURE',
+        message: `${errors.length} batches failed to load via SDK`,
+        details: errors,
+        retryable: false,
+      } : undefined,
+      metadata: {
+        rowsProcessed: inputData.length,
+        durationMs: duration,
+        aggregatorType: 'SDK',
+        warnings: errors.length > 0 ? [`${errors.length} batches failed`] : undefined,
+      },
+    };
+
+    await this.logActivityComplete(context.executionId, context.activityId, activityResult, duration);
+    return activityResult;
   }
 
   private async getInstance(instanceId: string, tenantId: string) {

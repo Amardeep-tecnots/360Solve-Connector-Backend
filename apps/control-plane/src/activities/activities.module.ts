@@ -11,9 +11,10 @@ import { DataTransformService } from './handlers/data-transform.service';
 import { ExecutionStateService } from '../executions/services/execution-state.service';
 import { PrismaService } from '../prisma.service';
 import { AggregatorsModule } from '../aggregators/aggregators.module';
+import { AIModule } from '../ai/ai.module';
 
 @Module({
-  imports: [AggregatorsModule],
+  imports: [AggregatorsModule, AIModule],
   controllers: [ActivitiesController],
   providers: [
     ActivityExecutorService,

@@ -23,6 +23,9 @@ export interface ActivityExecutionResult {
     durationMs: number;
     bytesTransferred?: number;
     warnings?: string[];
+    aggregatorType?: string;
+    sourceTable?: string;
+    [key: string]: any; // Allow additional metadata properties
   };
 }
 

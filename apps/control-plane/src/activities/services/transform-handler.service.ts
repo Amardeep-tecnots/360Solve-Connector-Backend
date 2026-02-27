@@ -81,14 +81,21 @@ export class TransformHandlerService extends BaseActivityHandler {
       
       // If no code provided, check if mappingId is provided to load transformCode from stored mapping
       if (!transformCode && config.mappingId) {
-        transformCode = await this.getTransformCodeFromMapping(config.mappingId, context.tenantId);
+        const mappingResult = await this.getTransformCodeFromMapping(config.mappingId, context.tenantId);
+        transformCode = mappingResult.transformCode;
+        
+        // If no transformCode but mappingRules exist, generate transformCode from mappingRules
+        if (!transformCode && mappingResult.mappingRules) {
+          transformCode = this.generateTransformFromMappingRules(mappingResult.mappingRules);
+          this.logger.log(`Generated transformCode from mappingRules for mapping "${mappingResult.name}"`);
+        }
       }
 
       // Throw clear error if no transformation code is available
       if (!transformCode) {
         throw new Error(
           'Transform activity requires transformation code. Provide either "config.code" or "config.mappingId" ' +
-          'that references a stored mapping with transformCode.'
+          'that references a stored mapping with transformCode or mappingRules.'
         );
       }
 
@@ -136,9 +143,9 @@ export class TransformHandlerService extends BaseActivityHandler {
   }
 
   /**
-   * Load transformCode from a stored mapping
+   * Load transformCode and mappingRules from a stored mapping
    */
-  private async getTransformCodeFromMapping(mappingId: string, tenantId: string): Promise<string | null> {
+  private async getTransformCodeFromMapping(mappingId: string, tenantId: string): Promise<{ transformCode: string | null; mappingRules: any[] | null; name: string }> {
     const mapping = await this.prisma.fieldMapping.findFirst({
       where: {
         id: mappingId,
@@ -147,6 +154,7 @@ export class TransformHandlerService extends BaseActivityHandler {
       },
       select: {
         transformCode: true,
+        mappingRules: true,
         name: true,
       },
     });
@@ -157,18 +165,88 @@ export class TransformHandlerService extends BaseActivityHandler {
       );
     }
 
-    if (!mapping.transformCode) {
+    if (mapping.transformCode) {
+      this.logger.log(
+        `Loaded transformCode from mapping "${mapping.name}" (${mappingId})`
+      );
+    } else {
       this.logger.warn(
         `Mapping "${mapping.name}" (${mappingId}) has no transformCode defined. ` +
-        'The mapping may need to be regenerated with AI transformation.'
+        'Will try to generate from mappingRules if available.'
       );
-      return null;
     }
 
-    this.logger.log(
-      `Loaded transformCode from mapping "${mapping.name}" (${mappingId})`
-    );
+    return {
+      transformCode: mapping.transformCode,
+      mappingRules: mapping.mappingRules as any[] | null,
+      name: mapping.name,
+    };
+  }
 
-    return mapping.transformCode;
+  /**
+   * Generate transformation code from mappingRules
+   * This creates JavaScript code that applies field-by-field transformations
+   */
+  private generateTransformFromMappingRules(mappingRules: any[]): string {
+    if (!mappingRules || mappingRules.length === 0) {
+      return 'return input;';
+    }
+
+    // Build transformation code from mapping rules
+    const transformations: string[] = [];
+    
+    for (const rule of mappingRules) {
+      const sourceField = rule.sourceField;
+      const destField = rule.destinationField;
+      const transform = rule.transform;
+      const defaultValue = rule.defaultValue !== undefined ? JSON.stringify(rule.defaultValue) : 'undefined';
+      
+      let valueExpr = `row.${sourceField}`;
+      
+      // Apply transformation based on the transform type
+      switch (transform) {
+        case 'uppercase':
+          valueExpr = `String(${valueExpr || '""'}).toUpperCase()`;
+          break;
+        case 'lowercase':
+          valueExpr = `String(${valueExpr || '""'}).toLowerCase()`;
+          break;
+        case 'string-to-number':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? Number(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'number-to-string':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? String(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'boolean-to-string':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? String(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'json-stringify':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? JSON.stringify(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'json-parse':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null && typeof ${valueExpr} === 'string' ? JSON.parse(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'date-format':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? new Date(${valueExpr}).toISOString() : ${defaultValue}`;
+          break;
+        case 'direct':
+        case undefined:
+        case null:
+        default:
+          // Keep as is, just check for null/undefined
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? ${valueExpr} : ${defaultValue}`;
+          break;
+      }
+
+      transformations.push(`      ${destField}: ${valueExpr}`);
+    }
+
+    const code = `return input.map(row => {
+  return {
+${transformations.join(',\n')}
+  };
+});`;
+
+    return code;
   }
 }

@@ -36,7 +36,7 @@ export class DataTransformService {
     try {
       // Wrap user code in a function
       const wrappedCode = `
-        (function(data) {
+        (function(input) {
           ${code}
         })(data)
       `;

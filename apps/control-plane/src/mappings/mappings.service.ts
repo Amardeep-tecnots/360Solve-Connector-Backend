@@ -358,10 +358,34 @@ export class MappingsService {
         };
       }
 
+      // Auto-generate transformCode if missing or is a placeholder
+      if (!generated.transformCode || 
+          generated.transformCode.includes('Optional') || 
+          generated.transformCode.includes('optional') ||
+          generated.transformCode.trim() === '' ||
+          generated.transformCode.startsWith('//')) {
+        this.logger.log('AI did not generate transformCode, auto-generating from mappingRules');
+        generated.transformCode = this.generateTransformFromMappingRules(generated.mappingRules);
+      }
+
       // Save mapping if requested
-      if (dto.saveMapping) {
+      if (dto.saveMapping !== false) {
         const mappingName = dto.name || `${dto.source.name}_to_${dto.destination.name}_${Date.now()}`;
         const mappingType = this.determineMappingType(dto.source.type, dto.destination.type);
+
+        // Validate instance IDs before creating mapping
+        // AI SDKs (IDs starting with "sdk-" or "sdk_") are in aggregators table, not aggregator_instances
+        // They cannot be used as foreign keys, so we set them to null
+        const validatedSourceInstanceId = await this.validateInstanceIdForMapping(
+          dto.source.instanceId, 
+          tenantId, 
+          'source'
+        );
+        const validatedDestInstanceId = await this.validateInstanceIdForMapping(
+          dto.destination.instanceId, 
+          tenantId, 
+          'destination'
+        );
 
         const mapping = await this.prisma.fieldMapping.create({
           data: {
@@ -369,12 +393,12 @@ export class MappingsService {
             name: mappingName,
             description: dto.description,
             type: mappingType as any,
-            sourceInstanceId: dto.source.instanceId,
+            sourceInstanceId: validatedSourceInstanceId,
             sourceType: dto.source.type,
             sourceConnectorId: dto.source.connectorId,
             sourceName: dto.source.name,
             sourceSchema: sourceContext.schema,
-            destinationInstanceId: dto.destination.instanceId,
+            destinationInstanceId: validatedDestInstanceId,
             destinationType: dto.destination.type,
             destinationConnectorId: dto.destination.connectorId,
             destinationName: dto.destination.name,
@@ -706,6 +730,55 @@ export class MappingsService {
     }
 
     return instance;
+  }
+
+  /**
+   * Validate instance ID for mapping creation.
+   * AI SDKs (IDs starting with "sdk-" or "sdk_") exist in the aggregators table, not aggregator_instances.
+   * Since they cannot be used as foreign keys, return null instead.
+   * 
+   * @param instanceId - The instance ID to validate
+   * @param tenantId - The tenant ID
+   * @param type - 'source' or 'destination' for logging purposes
+   * @returns The validated instance ID or null if it cannot be used as FK
+   */
+  private async validateInstanceIdForMapping(
+    instanceId: string | undefined, 
+    tenantId: string, 
+    type: 'source' | 'destination'
+  ): Promise<string | null> {
+    // If no instance ID, return null
+    if (!instanceId) {
+      return null;
+    }
+
+    // Check if it's an AI-generated SDK (cannot be used as FK to aggregator_instances)
+    // These IDs start with "sdk-" or "sdk_" and exist in aggregators table
+    if (instanceId.startsWith('sdk-') || instanceId.startsWith('sdk_')) {
+      this.logger.log(
+        `${type} instance ID "${instanceId}" is an AI SDK (stored in aggregators table), ` +
+        `setting to null to avoid FK violation`
+      );
+      return null;
+    }
+
+    // Check if the instance exists in aggregator_instances table
+    const instance = await this.prisma.aggregatorInstance.findFirst({
+      where: { id: instanceId, tenantId },
+      select: { id: true },
+    });
+
+    if (instance) {
+      // Instance exists, use it
+      return instanceId;
+    }
+
+    // Instance not found - log warning and return null
+    this.logger.warn(
+      `${type} instance "${instanceId}" not found in aggregator_instances, ` +
+      `setting to null to avoid FK violation`
+    );
+    return null;
   }
 
   private determineMappingType(sourceType: string, destType: string): MappingTypeDto {
@@ -1461,5 +1534,74 @@ Generate the optimal field mappings. Respond with JSON only.`;
         errors: [error.message],
       };
     }
+  }
+
+  /**
+   * Generate transformation code from mappingRules
+   * This creates JavaScript code that applies field-by-field transformations
+   */
+  private generateTransformFromMappingRules(mappingRules: MappingRule[]): string {
+    if (!mappingRules || mappingRules.length === 0) {
+      return 'return input;';
+    }
+
+    // Build transformation code from mapping rules
+    const transformations: string[] = [];
+    
+    for (const rule of mappingRules) {
+      const sourceField = rule.sourceField;
+      const destField = rule.destinationField;
+      const transform = rule.transform;
+      const defaultValue = rule.defaultValue !== undefined ? JSON.stringify(rule.defaultValue) : 'undefined';
+      
+      let valueExpr = `row.${sourceField}`;
+      
+      // Apply transformation based on the transform type
+      switch (transform) {
+        case 'uppercase':
+          valueExpr = `String(${valueExpr || '""'}).toUpperCase()`;
+          break;
+        case 'lowercase':
+          valueExpr = `String(${valueExpr || '""'}).toLowerCase()`;
+          break;
+        case 'string-to-number':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? Number(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'number-to-string':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? String(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'boolean-to-string':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? String(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'json-stringify':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? JSON.stringify(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'json-parse':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null && typeof ${valueExpr} === 'string' ? JSON.parse(${valueExpr}) : ${defaultValue}`;
+          break;
+        case 'date-format':
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? new Date(${valueExpr}).toISOString() : ${defaultValue}`;
+          break;
+        case 'direct':
+        case undefined:
+        case null:
+        default:
+          // Keep as is, just check for null/undefined
+          valueExpr = `${valueExpr} !== undefined && ${valueExpr} !== null ? ${valueExpr} : ${defaultValue}`;
+          break;
+      }
+
+      // Quote field names that contain dots (e.g., "ProductsContractsSummitProductSyncRequest.id")
+      const safeDestField = destField.includes('.') ? `"${destField}"` : destField;
+      transformations.push(`      ${safeDestField}: ${valueExpr}`);
+    }
+
+    const code = `return input.map(row => {
+  return {
+${transformations.join(',\n')}
+  };
+});`;
+
+    return code;
   }
 }

@@ -110,7 +110,7 @@ export class GenerateMappingDto {
   @IsString()
   model?: string;
 
-  @ApiPropertyOptional({ description: 'Save the generated mapping automatically', default: false })
+  @ApiPropertyOptional({ description: 'Save the generated mapping automatically', default: true })
   @IsOptional()
   saveMapping?: boolean;
 }
