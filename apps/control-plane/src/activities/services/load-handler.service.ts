@@ -36,6 +36,8 @@ interface LoadConfig {
   sdkMethod?: string;
   /** Alternative to sdkMethod - used as fallback when sdkMethod is not provided */
   method?: string;
+  /** List of available SDK methods - first method will be used as fallback */
+  sdkMethods?: string[];
   sdkConfig?: {
     baseUrl?: string;
     apiKey?: string;
@@ -236,11 +238,12 @@ export class LoadHandlerService extends BaseActivityHandler {
   ): Promise<ActivityExecutionResult> {
     // Use sdkId or aggregatorInstanceId as the aggregatorId
     const sdkId = config.sdkId || config.aggregatorInstanceId;
-    // Priority: sdkMethod > method > default 'create'
-    const method = config.sdkMethod || config.method || 'create';
+    // Priority: sdkMethod > sdkMethods[0] > method > default 'create'
+    // Note: sdkMethods[0] is checked before method to prefer the AI-selected method
+    const method = config.sdkMethod || (config.sdkMethods && config.sdkMethods.length > 0 ? config.sdkMethods[0] : null) || config.method || 'create';
     const batchSize = config.batchSize || 100;
     
-    this.logger.log(`[LOAD DEBUG] SDK method resolution: sdkMethod=${config.sdkMethod}, method=${config.method}, final=${method}`);
+    this.logger.log(`[LOAD DEBUG] SDK method resolution: sdkMethod=${config.sdkMethod}, method=${config.method}, sdkMethods=${JSON.stringify(config.sdkMethods)}, final=${method}`);
 
     this.logger.log(`Executing SDK load: ${sdkId}.${method} with ${inputData.length} rows`);
 

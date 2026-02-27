@@ -139,7 +139,24 @@ export class WasmCompilerService {
     }
     cleanCode = cleanCode.trim();
 
-    // Use regex to find method definitions
+    // First, find all class definitions
+    const classPattern = /export\s+class\s+(\w+)/g;
+    let classMatch;
+    const classNames: string[] = [];
+    
+    while ((classMatch = classPattern.exec(cleanCode)) !== null) {
+      classNames.push(classMatch[1]);
+    }
+
+    // If no exported class found, try non-exported class
+    if (classNames.length === 0) {
+      const nonExportedClassPattern = /class\s+(\w+)/g;
+      while ((classMatch = nonExportedClassPattern.exec(cleanCode)) !== null) {
+        classNames.push(classMatch[1]);
+      }
+    }
+
+    // Use regex to find method definitions inside classes
     // Match: async methodName(params): Promise<ReturnType> { ... }
     const methodPattern = /(?:async\s+)?(\w+)\s*\(([^)]*)\)\s*(?::\s*Promise<([^>]+)>|\s*:\s*([^;\n{]+))?\s*\{/g;
     
@@ -155,14 +172,42 @@ export class WasmCompilerService {
       const params = match[2] ? match[2].split(',').map(p => p.trim()).filter(p => p) : [];
       const returnType = match[3] || match[4] || 'any';
 
-      methods.push({
-        name: methodName,
-        parameters: params.map(p => p.split(':')[0].trim()),
-        returnType: returnType.trim(),
-      });
+      // If we found class names, create method entries with class prefix
+      if (classNames.length > 0) {
+        for (const className of classNames) {
+          methods.push({
+            name: `${className}.${methodName}`,
+            parameters: params.map(p => p.split(':')[0].trim()),
+            returnType: returnType.trim(),
+          });
+          // Also add just the method name for direct matching
+          methods.push({
+            name: methodName,
+            parameters: params.map(p => p.split(':')[0].trim()),
+            returnType: returnType.trim(),
+          });
+        }
+      } else {
+        // No class found, just add method name
+        methods.push({
+          name: methodName,
+          parameters: params.map(p => p.split(':')[0].trim()),
+          returnType: returnType.trim(),
+        });
+      }
     }
 
-    return methods;
+    // Deduplicate by name
+    const seen = new Set<string>();
+    const uniqueMethods: SDKMethod[] = [];
+    for (const method of methods) {
+      if (!seen.has(method.name)) {
+        seen.add(method.name);
+        uniqueMethods.push(method);
+      }
+    }
+
+    return uniqueMethods;
   }
 
   /**

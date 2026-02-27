@@ -130,8 +130,15 @@ export class SDKExecutionService {
       // Step 3: Get SDK code (from cache or storage)
       const sdkCode = await this.loadSDKCode(aggregatorId);
 
+      // Force recompile to get fresh method extraction
+      // Clear cache entry to ensure we get the latest methods
+      this.sdkCache.delete(aggregatorId);
+
       // Step 4: Compile the SDK (from cache or compile)
       const compiled = await this.compileSDK(aggregatorId, sdkCode);
+
+      // Log extracted methods for debugging
+      this.logger.debug(`Extracted SDK methods: ${JSON.stringify(compiled.methods?.map(m => m.name) || [])}`);
 
       if (!compiled.jsCode) {
         throw new BadRequestException('Failed to compile SDK');
@@ -143,12 +150,13 @@ export class SDKExecutionService {
         throw new BadRequestException(`SDK code validation failed: ${validation.errors?.join(', ')}`);
       }
 
-      // Step 6: Execute the method in sandbox with merged credentials
+      // Step 6: Execute the method in sandbox with merged credentials and extracted methods
       const result = await this.executeInSandbox(
         compiled.jsCode,
         method,
         params,
-        mergedConfig
+        mergedConfig,
+        compiled.methods
       );
 
       const executionTimeMs = Date.now() - startTime;
@@ -245,7 +253,8 @@ export class SDKExecutionService {
     jsCode: string,
     methodName: string,
     params: Record<string, any>,
-    config?: SDKConfig
+    config?: SDKConfig,
+    extractedMethods?: SDKMethod[]
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       try {
@@ -254,6 +263,7 @@ export class SDKExecutionService {
           // SDK will be loaded here
           __sdk_exports: null,
           __sdk_instance: null,
+          __sdk_class_name: null,
           
           // Console for debugging
           console: {
@@ -322,51 +332,53 @@ export class SDKExecutionService {
           },
         };
 
-        // Create VM2 script
+        // Create VM2 script that properly exports the SDK class and instance
         const script = new vm.VMScript(`
           // Load the SDK code
           ${jsCode}
           
-          // Find and instantiate the SDK class
-          const __sdk_exports = {};
-          const __keys = Object.keys(global || this);
+          // Find and export the SDK class (not instance)
+          let __sdk_class = null;
+          let __sdk_class_name = null;
           
-          // Try to find the class and instantiate it
-          let SDKClass = null;
+          // First, try to find the class in exports
           for (const key of Object.keys(exports || {})) {
-            if (typeof exports[key] === 'function' && !key.startsWith('_')) {
-              SDKClass = exports[key];
+            if (typeof exports[key] === 'function' && /^[A-Z]/.test(key) && !key.startsWith('_')) {
+              __sdk_class = exports[key];
+              __sdk_class_name = key;
               break;
             }
           }
           
-          // If no class found in exports, try window/global
-          if (!SDKClass) {
+          // If no class found in exports, try global/this
+          if (!__sdk_class) {
             for (const key of Object.keys(this)) {
               if (typeof this[key] === 'function' && 
                   /^[A-Z]/.test(key) && 
                   !key.startsWith('_')) {
-                SDKClass = this[key];
+                __sdk_class = this[key];
+                __sdk_class_name = key;
                 break;
               }
             }
           }
           
-          // Create instance with config
-          const __config = ${JSON.stringify(config || {})};
-          let __sdk_instance = null;
-          
-          if (SDKClass) {
-            try {
-              __sdk_instance = new SDKClass(__config);
-            } catch (e) {
-              // If constructor fails, try calling as function
-              __sdk_instance = SDKClass(__config);
+          // Export both class name and a function to create instance
+          {
+            className: __sdk_class_name,
+            createInstance: function(config) {
+              if (!__sdk_class) return null;
+              try {
+                return new __sdk_class(config);
+              } catch (e) {
+                try {
+                  return __sdk_class(config);
+                } catch (e2) {
+                  return null;
+                }
+              }
             }
           }
-          
-          // Export the instance
-          __sdk_instance;
         `);
 
         // Create VM context
@@ -379,19 +391,59 @@ export class SDKExecutionService {
         });
 
         // Run the script
-        const sdkInstance = vmContext.run(script);
+        const sdkExport = vmContext.run(script);
         
-        if (!sdkInstance) {
-          throw new Error('Failed to instantiate SDK');
+        if (!sdkExport || !sdkExport.createInstance) {
+          throw new Error('Failed to load SDK - no class found in code');
         }
 
-        // Check if method exists
+        this.logger.debug(`SDK class name: ${sdkExport.className}`);
+        
+        // Create instance with config
+        const sdkInstance = sdkExport.createInstance(config || {});
+        
+        if (!sdkInstance) {
+          throw new Error(`Failed to instantiate SDK class: ${sdkExport.className}`);
+        }
+
+        // Check if method exists directly on instance
+        let actualMethodName = methodName;
+        
         if (typeof sdkInstance[methodName] !== 'function') {
-          throw new Error(`Method '${methodName}' not found on SDK. Available: ${Object.keys(sdkInstance).filter(k => typeof sdkInstance[k] === 'function').join(', ')}`);
+          // Method not found directly, try fuzzy matching using extracted methods
+          if (extractedMethods && extractedMethods.length > 0) {
+            this.logger.debug(`Method '${methodName}' not found directly, trying extracted methods`);
+            
+            // Try to find method with ClassName.methodName format
+            const matchingMethod = extractedMethods.find(m => 
+              m.name === methodName || 
+              m.name === `${sdkExport.className}.${methodName}` ||
+              m.name.endsWith(`.${methodName}`)
+            );
+            
+            if (matchingMethod) {
+              // Extract just the method name from the full name
+              const parts = matchingMethod.name.split('.');
+              actualMethodName = parts[parts.length - 1];
+              this.logger.debug(`Matched method '${methodName}' to '${actualMethodName}'`);
+            }
+          }
+          
+          // Final check
+          if (typeof sdkInstance[actualMethodName] !== 'function') {
+            const availableMethods = Object.keys(sdkInstance).filter(k => typeof sdkInstance[k] === 'function');
+            const extractedMethodNames = extractedMethods?.map(m => m.name) || [];
+            
+            throw new Error(
+              `Method '${methodName}' not found on SDK. ` +
+              `Available instance methods: ${availableMethods.join(', ')}. ` +
+              `Extracted methods: ${extractedMethodNames.join(', ')}`
+            );
+          }
         }
 
         // Execute the method
-        const methodResult = sdkInstance[methodName](params);
+        const methodResult = sdkInstance[actualMethodName](params);
         
         // Handle Promise results
         if (methodResult instanceof Promise) {
