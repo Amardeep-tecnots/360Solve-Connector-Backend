@@ -112,11 +112,12 @@ export class SDKGeneratorService {
       // Priority: 1) aggregatorId (link to existing), 2) className, 3) default
       let sdkId: string;
       let aggregatorName: string;
+      const targetTenantId = request.tenantId || 'system';
       
       if (request.aggregatorId) {
         // Link to existing aggregator - get its name
-        const existingAgg = await this.prisma.aggregator.findUnique({
-          where: { id: request.aggregatorId },
+        const existingAgg = await this.prisma.aggregator.findFirst({
+          where: { id: request.aggregatorId, tenantId: targetTenantId },
         });
         
         if (!existingAgg) {
@@ -200,12 +201,9 @@ export class SDKGeneratorService {
       this.logger.log(`Extracted ${extractedSchema.fields.length} fields and ${extractedSchema.endpoints.length} endpoints`);
 
       // Step 7: Save to database and storage
-      // Store code in S3
-      await this.storage.uploadFile(
-        `tenants/global/sdks/${sdkId}/code.ts`,
-        sdkCode,
-        'text/typescript'
-      );
+      // Store code in object storage
+      const storageKey = `tenants/${targetTenantId}/sdks/${sdkId}/code.ts`;
+      await this.storage.uploadFile(storageKey, sdkCode, 'text/typescript');
 
       // Build configSchema with extracted fields for auto schema discovery
       const configSchema: any = {
@@ -219,8 +217,8 @@ export class SDKGeneratorService {
       };
 
       // Check if we're updating an existing aggregator or creating new
-      const existingAggregator = await this.prisma.aggregator.findUnique({
-        where: { id: sdkId },
+      const existingAggregator = await this.prisma.aggregator.findFirst({
+        where: { id: sdkId, tenantId: targetTenantId },
       });
 
       if (existingAggregator) {
@@ -231,8 +229,9 @@ export class SDKGeneratorService {
             name: className,
             description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
             configSchema,
-            sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
+            sdkRef: storageKey,
             sdkVersion: (existingAggregator.sdkVersion || 0) + 1,
+            tenantId: targetTenantId,
             // Store credentials if provided
             ...(request.credentials && {
               credentials: {
@@ -249,7 +248,7 @@ export class SDKGeneratorService {
         await this.prisma.aggregator.create({
           data: {
             id: sdkId,
-            tenantId: 'system',
+            tenantId: targetTenantId,
             name: className,
             description: `AI-generated SDK from OpenAPI spec (${endpointCount} endpoints)`,
             category: 'API',
@@ -258,7 +257,7 @@ export class SDKGeneratorService {
             capabilities: ['read', 'query'],
             authMethods: ['apiKey', 'bearer'],
             configSchema,
-            sdkRef: `s3://tenants/global/sdks/${sdkId}/code.ts`,
+            sdkRef: storageKey,
             sdkVersion: 1,
             isPublic: false,
             // Store credentials if provided
@@ -835,11 +834,14 @@ Respond ONLY with the TypeScript code, no markdown formatting.`;
   }
 
   /**
-   * Get SDK by ID
+   * Get SDK by ID with optional tenant scoping
    */
-  async getSDK(sdkId: string): Promise<GeneratedSDK | null> {
-    const aggregator = await this.prisma.aggregator.findUnique({
-      where: { id: sdkId },
+  async getSDK(sdkId: string, tenantId?: string): Promise<GeneratedSDK | null> {
+    const aggregator = await this.prisma.aggregator.findFirst({
+      where: {
+        id: sdkId,
+        ...(tenantId ? { tenantId } : {}),
+      },
     });
 
     if (!aggregator || !aggregator.sdkRef) {
@@ -859,12 +861,13 @@ Respond ONLY with the TypeScript code, no markdown formatting.`;
   }
 
   /**
-   * List all generated SDKs
+   * List all generated SDKs visible to a tenant
    */
-  async listSDKs(): Promise<Array<{ id: string; name: string; createdAt: Date }>> {
+  async listSDKs(tenantId?: string): Promise<Array<{ id: string; name: string; createdAt: Date }>> {
     const aggregators = await this.prisma.aggregator.findMany({
       where: {
         sdkRef: { not: null },
+        ...(tenantId ? { tenantId } : {}),
       },
       select: {
         id: true,

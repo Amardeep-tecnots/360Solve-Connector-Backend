@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, Res, HttpStatus, UseGuards, ValidationPipe, UsePipes } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Res, HttpStatus, UseGuards, ValidationPipe, UsePipes, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody } from '@nestjs/swagger';
 import { Response } from 'express';
 import { AIProviderService, AIProvider, GenerateSDKRequest, GenerateWorkflowRequest, GenerateSchemaMappingRequest } from './ai-provider.service';
@@ -6,13 +6,14 @@ import { SDKGeneratorService } from './sdk-generator.service';
 import { SDKExecutionService } from './sdk-execution.service';
 import { WorkflowGeneratorService } from './workflow-generator.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { TenantId } from '../common/decorators/tenant-id.decorator';
 import { IsString, IsOptional, MinLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 @ApiTags('AI')
 @Controller('ai')
-// @UseGuards(JwtAuthGuard)
-// @ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
+@ApiBearerAuth()
 export class AIController {
   constructor(
     private readonly aiProvider: AIProviderService,
@@ -58,8 +59,11 @@ export class AIController {
   @ApiOperation({ summary: 'Generate TypeScript SDK from OpenAPI specification' })
   @ApiResponse({ status: 201, description: 'SDK generated successfully' })
   @ApiResponse({ status: 400, description: 'Invalid request' })
-  async generateSDK(@Body() request: GenerateSDKRequest) {
-    const result = await this.sdkGenerator.generateSDK(request);
+  async generateSDK(@TenantId() tenantId: string, @Body() request: GenerateSDKRequest) {
+    const result = await this.sdkGenerator.generateSDK({
+      ...request,
+      tenantId,
+    });
     return {
       success: result.success,
       data: result.success ? {
@@ -78,8 +82,8 @@ export class AIController {
   @ApiOperation({ summary: 'Get generated SDK by ID' })
   @ApiResponse({ status: 200, description: 'SDK details' })
   @ApiResponse({ status: 404, description: 'SDK not found' })
-  async getSDK(@Param('id') id: string) {
-    const sdk = await this.sdkGenerator.getSDK(id);
+  async getSDK(@Param('id') id: string, @Query('tenantId') tenantId?: string) {
+    const sdk = await this.sdkGenerator.getSDK(id, tenantId);
     if (!sdk) {
       return {
         success: false,
@@ -98,8 +102,8 @@ export class AIController {
   @Get('sdks')
   @ApiOperation({ summary: 'List all generated SDKs' })
   @ApiResponse({ status: 200, description: 'List of SDKs' })
-  async listSDKs() {
-    const sdks = await this.sdkGenerator.listSDKs();
+  async listSDKs(@Query('tenantId') tenantId?: string) {
+    const sdks = await this.sdkGenerator.listSDKs(tenantId);
     return {
       success: true,
       data: sdks,
@@ -112,8 +116,8 @@ export class AIController {
   @Get('sdk/:id/download')
   @ApiOperation({ summary: 'Download SDK source code' })
   @ApiResponse({ status: 200, description: 'SDK code file' })
-  async downloadSDK(@Param('id') id: string, @Res() res: Response) {
-    const sdk = await this.sdkGenerator.getSDK(id);
+  async downloadSDK(@Param('id') id: string, @Res() res: Response, @Query('tenantId') tenantId?: string) {
+    const sdk = await this.sdkGenerator.getSDK(id, tenantId);
     if (!sdk) {
       res.status(HttpStatus.NOT_FOUND).json({
         success: false,
@@ -219,6 +223,7 @@ export class AIController {
   @ApiResponse({ status: 400, description: 'Execution failed' })
   async executeSDKMethod(
     @Param('id') id: string,
+    @TenantId() tenantId: string,
     @Body() body: {
       method: string;
       params?: Record<string, any>;
@@ -233,7 +238,7 @@ export class AIController {
     const { method, params, config } = body;
 
     const result = await this.sdkExecution.executeMethod({
-      tenantId: 'system', // TODO: Get from auth
+      tenantId,
       aggregatorId: id,
       method,
       params: params || {},

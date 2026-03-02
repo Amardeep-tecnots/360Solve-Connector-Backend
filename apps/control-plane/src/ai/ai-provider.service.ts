@@ -158,10 +158,17 @@ export class SDKCredentialsDto {
 export class GenerateSDKRequest {
   @ApiProperty({ 
     description: 'OpenAPI spec URL or raw JSON content',
-    example: 'https://petstore.swagger.io/v2/swagger.json'
+    example: 'https://api.example.com/openapi.json'
   })
   @IsString()
   openApiSpec!: string;
+
+  @ApiPropertyOptional({
+    description: 'Tenant ID for scoping the generated SDK (defaults to system)',
+  })
+  @IsOptional()
+  @IsString()
+  tenantId?: string;
 
   @ApiPropertyOptional({ 
     description: 'Custom model to use for generation',
