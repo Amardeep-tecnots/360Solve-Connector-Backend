@@ -1,24 +1,49 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  BlobServiceClient,
+  BlockBlobClient,
+  StorageSharedKeyCredential,
+} from '@azure/storage-blob';
 
 @Injectable()
 export class StorageService {
   private readonly logger = new Logger(StorageService.name);
-  private readonly s3Client: S3Client;
-  private readonly bucketName: string;
+  private readonly blobServiceClient: BlobServiceClient | null;
+  private readonly containerName: string;
+  private readonly accountName?: string;
+  private readonly accountKey?: string;
 
   constructor() {
-    this.s3Client = new S3Client({
-      endpoint: process.env.S3_ENDPOINT || 'http://localhost:9000',
-      credentials: {
-        accessKeyId: process.env.S3_ACCESS_KEY || 'minioadmin',
-        secretAccessKey: process.env.S3_SECRET_KEY || 'minioadmin',
-      },
-      region: 'us-east-1',
-      forcePathStyle: true,
-    });
+    const rawConn = (process.env.AZURE_STORAGE_CONNECTION_STRING || '').trim();
+    const connectionString = rawConn.replace(/\r|\n|\t/g, '').replace(/\s+/g, '');
+    this.containerName = process.env.AZURE_STORAGE_CONTAINER || 'vansales-connector';
 
-    this.bucketName = process.env.S3_BUCKET || 'vansales-connector';
+    let blobServiceClient: BlobServiceClient | null = null;
+    if (connectionString && connectionString.includes('AccountName=') && connectionString.includes('AccountKey=')) {
+      try {
+        blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        this.logger.log(`Azure Blob client initialized via connection string for container: ${this.containerName}`);
+      } catch (err) {
+        this.logger.error(`Failed to init Azure Blob client from connection string: ${(err as Error).message}`);
+      }
+    } else {
+      this.accountName = process.env.AZURE_STORAGE_ACCOUNT;
+      this.accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+      if (this.accountName && this.accountKey) {
+        try {
+          const credential = new StorageSharedKeyCredential(this.accountName, this.accountKey);
+          const url = process.env.AZURE_STORAGE_URL || `https://${this.accountName}.blob.core.windows.net`;
+          blobServiceClient = new BlobServiceClient(url, credential);
+          this.logger.log(`Azure Blob client initialized via account/key for container: ${this.containerName}`);
+        } catch (err) {
+          this.logger.error(`Failed to init Azure Blob client from account/key: ${(err as Error).message}`);
+        }
+      } else {
+        this.logger.warn('Azure storage credentials not configured (connection string or account/key). Storage disabled.');
+      }
+    }
+
+    this.blobServiceClient = blobServiceClient;
   }
 
   async upload(
@@ -27,48 +52,30 @@ export class StorageService {
     contentType?: string
   ): Promise<{ success: boolean; url?: string; error?: string }> {
     try {
-      const command = new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: key,
-        Body: data,
-        ContentType: contentType || 'application/json',
+      const client = await this.getBlockBlobClient(key);
+      if (!client) {
+        return { success: false, error: 'Storage not configured' };
+      }
+
+      await client.uploadData(typeof data === 'string' ? Buffer.from(data) : data, {
+        blobHTTPHeaders: { blobContentType: contentType || 'application/octet-stream' },
       });
 
-      await this.s3Client.send(command);
-
-      const url = `${process.env.S3_ENDPOINT || 'http://localhost:9000'}/${this.bucketName}/${key}`;
-
+      const url = client.url;
       this.logger.log(`Uploaded ${key} to storage`);
 
-      return {
-        success: true,
-        url,
-      };
-
-    } catch (error) {
+      return { success: true, url };
+    } catch (error: any) {
       this.logger.error(`Upload failed for ${key}: ${error.message}`, error.stack);
-      return {
-        success: false,
-        error: error.message,
-      };
+      return { success: false, error: error.message };
     }
   }
 
-  /**
-   * Extract the object key from an S3 URI or use the key as-is
-   */
-  private parseKey(keyOrUri: string): string {
-    // Handle s3://bucket/key format
-    // We need to be careful not to remove actual path components that look like bucket names
+  private getKey(keyOrUri: string): string {
+    if (!keyOrUri) return keyOrUri;
     if (keyOrUri.startsWith('s3://')) {
-      // Remove 's3://' prefix only
       let key = keyOrUri.slice(5);
-      // If there's a leading slash issue, fix it
-      if (key.startsWith('/')) {
-        key = key.slice(1);
-      }
-      // Don't try to remove the "bucket" - just keep everything after s3://
-      // The actual bucket is configured separately in this.service
+      if (key.startsWith('/')) key = key.slice(1);
       return key;
     }
     return keyOrUri;
@@ -76,82 +83,53 @@ export class StorageService {
 
   async download(key: string): Promise<{ success: boolean; data?: Buffer; error?: string }> {
     try {
-      // Parse the key - handle s3:// URI format
-      const parsedKey = this.parseKey(key);
-      
-      this.logger.log(`Downloading from storage, bucket: ${this.bucketName}, key: ${parsedKey}, original: ${key}`);
+      const client = await this.getBlockBlobClient(key);
+      if (!client) {
+        return { success: false, error: 'Storage not configured' };
+      }
 
-      const command = new GetObjectCommand({
-        Bucket: this.bucketName,
-        Key: parsedKey,
-      });
-
-      const response = await this.s3Client.send(command);
-      const data = await response.Body?.transformToByteArray();
+      this.logger.log(`Downloading from storage, container: ${this.containerName}, key: ${key}`);
+      const buffer = await this.streamToBuffer(client);
 
       this.logger.log(`Downloaded ${key} from storage`);
-
-      return {
-        success: true,
-        data: data ? Buffer.from(data) : undefined,
-      };
-
-    } catch (error) {
+      return { success: true, data: buffer };
+    } catch (error: any) {
       this.logger.error(`Download failed for ${key}: ${error.message}`, error.stack);
-      return {
-        success: false,
-        error: error.message,
-      };
+      return { success: false, error: error.message };
     }
   }
 
   async delete(key: string): Promise<{ success: boolean; error?: string }> {
     try {
-      // Parse the key - handle s3:// URI format
-      const parsedKey = this.parseKey(key);
+      const client = await this.getBlockBlobClient(key);
+      if (!client) {
+        return { success: false, error: 'Storage not configured' };
+      }
 
-      const command = new DeleteObjectCommand({
-        Bucket: this.bucketName,
-        Key: parsedKey,
-      });
-
-      await this.s3Client.send(command);
-
+      await client.deleteIfExists();
       this.logger.log(`Deleted ${key} from storage`);
-
-      return {
-        success: true,
-      };
-
-    } catch (error) {
+      return { success: true };
+    } catch (error: any) {
       this.logger.error(`Delete failed for ${key}: ${error.message}`, error.stack);
-      return {
-        success: false,
-        error: error.message,
-      };
+      return { success: false, error: error.message };
     }
   }
 
   async exists(key: string): Promise<boolean> {
     try {
-      // Parse the key - handle s3:// URI format
-      const parsedKey = this.parseKey(key);
-
-      const command = new GetObjectCommand({
-        Bucket: this.bucketName,
-        Key: parsedKey,
-      });
-
-      await this.s3Client.send(command);
-      return true;
-
-    } catch (error) {
+      const client = await this.getBlockBlobClient(key);
+      if (!client) return false;
+      return await client.exists();
+    } catch {
       return false;
     }
   }
 
   getPublicUrl(key: string): string {
-    return `${process.env.S3_ENDPOINT || 'http://localhost:9000'}/${this.bucketName}/${key}`;
+    const normalizedKey = this.getKey(key);
+    const base = process.env.AZURE_STORAGE_URL || this.blobServiceClient?.url || '';
+    if (base) return `${base.replace(/\/$/, '')}/${this.containerName}/${normalizedKey}`;
+    return normalizedKey;
   }
 
   /**
@@ -174,5 +152,32 @@ export class StorageService {
       throw new Error(result.error || 'Download failed');
     }
     return result.data.toString('utf-8');
+  }
+
+  /**
+   * Create a BlockBlobClient for a given key
+   */
+  private async getBlockBlobClient(keyOrUri: string): Promise<BlockBlobClient | null> {
+    if (!this.blobServiceClient) return null;
+    const key = this.getKey(keyOrUri);
+    const containerClient = this.blobServiceClient.getContainerClient(this.containerName);
+    // Ensure container exists; avoid throwing if permissions prevent creation
+    try {
+      await containerClient.createIfNotExists();
+    } catch (err) {
+      this.logger.debug(`Container check/create skipped or failed: ${(err as Error).message}`);
+    }
+    return containerClient.getBlockBlobClient(key);
+  }
+
+  private async streamToBuffer(client: BlockBlobClient): Promise<Buffer> {
+    const download = await client.download();
+    const chunks: Buffer[] = [];
+    const readable = download.readableStreamBody;
+    if (!readable) return Buffer.alloc(0);
+    for await (const chunk of readable) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
 }
