@@ -100,8 +100,13 @@ export class SDKExecutionService {
     }
   }
 
-  async getSDKInfo(aggregatorId: string): Promise<SDKInfo | null> {
-    const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
+  async getSDKInfo(aggregatorId: string, tenantId?: string): Promise<SDKInfo | null> {
+    const aggregator = await this.prisma.aggregator.findFirst({
+      where: {
+        id: aggregatorId,
+        ...(tenantId ? { tenantId } : {}),
+      },
+    });
     if (!aggregator || !aggregator.sdkRef) return null;
     const code = await this.storage.downloadFile(aggregator.sdkRef);
     const compiled = await this.wasmCompiler.compile(code);
@@ -119,7 +124,15 @@ export class SDKExecutionService {
     try {
       const { tenantId, aggregatorId, method, params, config } = context;
       this.logger.log(`Executing SDK method: ${aggregatorId}.${method}`);
-      const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
+      const aggregator = await this.prisma.aggregator.findFirst({
+        where: {
+          id: aggregatorId,
+          ...(tenantId ? { tenantId } : {}),
+        },
+      });
+      if (!aggregator) {
+        throw new BadRequestException('SDK not found for this tenant or aggregator');
+      }
       const storedCredentials = (aggregator?.credentials as SDKConfig) || {};
       const mergedConfig: SDKConfig = {
         baseUrl: config?.baseUrl || storedCredentials.baseUrl,
@@ -130,7 +143,7 @@ export class SDKExecutionService {
       if (!mergedConfig.baseUrl) {
         throw new BadRequestException('No baseUrl provided. Either pass it in config or store it in the aggregator credentials.');
       }
-      const sdkCode = await this.loadSDKCode(aggregatorId);
+      const sdkCode = await this.loadSDKCode(aggregatorId, tenantId);
       this.sdkCache.delete(aggregatorId);
       const compiled = await this.compileSDK(aggregatorId, sdkCode);
       this.logger.debug(`Extracted SDK methods: ${JSON.stringify(compiled.methods?.map(m => m.name) || [])}`);
@@ -148,13 +161,18 @@ export class SDKExecutionService {
     }
   }
 
-  private async loadSDKCode(aggregatorId: string): Promise<string> {
+  private async loadSDKCode(aggregatorId: string, tenantId?: string): Promise<string> {
     const cached = this.sdkCache.get(aggregatorId);
     if (cached && Date.now() - cached.compiledAt.getTime() < this.CACHE_TTL_MS) {
       this.logger.debug(`Using cached SDK for ${aggregatorId}`);
       return cached.code;
     }
-    const aggregator = await this.prisma.aggregator.findUnique({ where: { id: aggregatorId } });
+    const aggregator = await this.prisma.aggregator.findFirst({
+      where: {
+        id: aggregatorId,
+        ...(tenantId ? { tenantId } : {}),
+      },
+    });
     if (!aggregator || !aggregator.sdkRef) throw new BadRequestException(`SDK not found for aggregator: ${aggregatorId}`);
     const code = await this.storage.downloadFile(aggregator.sdkRef);
     this.sdkCache.set(aggregatorId, { code, instance: null, compiledAt: new Date() });
