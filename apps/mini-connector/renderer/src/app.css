@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Midnight Theme (Default) */
+    --bg-base: #0F1115;
+    --bg-surface: #16181D;
+    --bg-elevated: #1C1F26;
+    --bg-hover: #22252B;
+
+    --border-subtle: #22252B;
+    --border-default: #2A2D35;
+    --border-strong: #363940;
+
+    --text-primary: #F0F0F3;
+    --text-secondary: #A0A3AB;
+    --text-tertiary: #6B6F78;
+
+    --accent-primary: #6366F1;
+    --accent-primary-hover: #7C7FF7;
+    --accent-primary-muted: rgba(99, 102, 241, 0.15);
+    
+    --accent-success: #10B981;
+    --accent-success-muted: rgba(16, 185, 129, 0.15);
+    
+    --accent-warning: #F59E0B;
+    --accent-warning-muted: rgba(245, 158, 11, 0.15);
+    
+    --accent-danger: #EF4444;
+    --accent-danger-muted: rgba(239, 68, 68, 0.15);
+  }
+
+  .theme-dracula {
+    --bg-base: #0D0B1A;
+    --bg-surface: #1A162B;
+    --bg-elevated: #211C34;
+    --bg-hover: #2B2340;
+
+    --border-subtle: #2B2340;
+    --border-default: #352D4A;
+    --border-strong: #443A5E;
+
+    --text-primary: #F8F8F2;
+    --text-secondary: #C7C7D1;
+    --text-tertiary: #8888A0;
+
+    --accent-primary: #BD93F9;
+    --accent-primary-hover: #CFA9FF;
+    --accent-primary-muted: rgba(189, 147, 249, 0.15);
+    
+    --accent-success: #50FA7B;
+    --accent-success-muted: rgba(80, 250, 123, 0.15);
+    
+    --accent-warning: #F1FA8C;
+    --accent-warning-muted: rgba(241, 250, 140, 0.15);
+    
+    --accent-danger: #FF5555;
+    --accent-danger-muted: rgba(255, 85, 85, 0.15);
+  }
+
+  .theme-light {
+    --bg-base: #F8FAFC;
+    --bg-surface: #FFFFFF;
+    --bg-elevated: #F1F5F9;
+    --bg-hover: #E2E8F0;
+
+    --border-subtle: #E2E8F0;
+    --border-default: #CBD5E1;
+    --border-strong: #94A3B8;
+
+    --text-primary: #0F172A;
+    --text-secondary: #475569;
+    --text-tertiary: #94A3B8;
+
+    --accent-primary: #4F46E5;
+    --accent-primary-hover: #4338CA;
+    --accent-primary-muted: rgba(79, 70, 229, 0.1);
+    
+    --accent-success: #10B981;
+    --accent-success-muted: rgba(16, 185, 129, 0.1);
+    
+    --accent-warning: #F59E0B;
+    --accent-warning-muted: rgba(245, 158, 11, 0.1);
+    
+    --accent-danger: #EF4444;
+    --accent-danger-muted: rgba(239, 68, 68, 0.1);
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md font-medium text-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-background disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  
+  .btn-primary {
+    @apply bg-primary text-white hover:bg-primary-hover focus:ring-primary;
+  }
+  
+  .btn-secondary {
+    @apply bg-background-elevated text-foreground-secondary border border-border hover:bg-background-hover hover:text-foreground focus:ring-border;
+  }
+  
+  .btn-ghost {
+    @apply bg-transparent text-foreground-secondary hover:bg-background-hover hover:text-foreground;
+  }
+  
+  .btn-danger {
+    @apply bg-danger-muted text-danger focus:ring-danger;
+  }
+  .btn-danger:hover {
+    background-color: rgba(239, 68, 68, 0.2);
+  }
+
+  .btn-success {
+    @apply bg-success-muted text-success focus:ring-success;
+  }
+  .btn-success:hover {
+    background-color: rgba(16, 185, 129, 0.2);
+  }
+
+  .btn-warning {
+    @apply bg-warning-muted text-warning focus:ring-warning;
+  }
+  .btn-warning:hover {
+    background-color: rgba(245, 158, 11, 0.2);
+  }
+
+  .card {
+    @apply bg-background-surface border border-border-subtle rounded-xl p-6 transition-all duration-200;
+  }
+  
+  .card-hover {
+    @apply hover:border-border hover:shadow-lg;
+  }
+
+  .input {
+    @apply w-full px-3 py-2 bg-background border border-border rounded-md text-foreground placeholder:text-foreground-tertiary focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all duration-200;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+}

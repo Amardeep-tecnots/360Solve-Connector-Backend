@@ -1,0 +1,103 @@
+{
+  "name": "mini-connector",
+  "version": "1.0.0",
+  "description": "VanSales Mini Connector - On-premise agent for ERP integration",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "dev:main": "tsc -p tsconfig.main.json && electron . --inspect",
+    "dev:renderer": "vite",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "package": "electron-builder",
+    "package:win": "set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win --x64",
+    "package:mac": "electron-builder --mac",
+    "package:linux": "electron-builder --linux"
+  },
+  "keywords": [
+    "electron",
+    "connector",
+    "vansales",
+    "erp",
+    "integration"
+  ],
+  "author": "360Solve",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.7",
+    "better-sqlite3": "^9.4.3",
+    "clsx": "^2.1.1",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.1",
+    "electron-store": "^8.1.0",
+    "framer-motion": "^12.34.0",
+    "lucide-react": "^0.564.0",
+    "machine-id": "^1.0.0",
+    "mssql": "^12.2.0",
+    "mysql2": "^3.6.5",
+    "node-sql-parser": "^5.4.0",
+    "pg": "^8.11.3",
+    "recharts": "^3.7.0",
+    "socket.io-client": "^4.7.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/mssql": "^9.1.9",
+    "@types/node": "^20.19.33",
+    "@types/pg": "^8.10.9",
+    "@types/react": "^18.2.46",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "concurrently": "^8.2.2",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "postcss": "^8.4.35",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.11"
+  },
+  "build": {
+    "appId": "com.360solve.nia",
+    "productName": "NIA",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "node_modules/dotenv/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "28.1.0",
+    "afterPack": "./afterPack.js",
+    "forceCodeSigning": false
+  }
+}

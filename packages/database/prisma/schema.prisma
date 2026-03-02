@@ -36,6 +36,7 @@ model Tenant {
   credentials         TenantCredential[]
   executions          WorkflowExecution[]
   controlFlags        SystemControlFlag[]
+  fieldMappings       FieldMapping[]
   
   @@index([tier, status])
   @@map("tenants")
@@ -237,6 +238,10 @@ model Aggregator {
   sdkRef      String?
   sdkVersion  Int      @default(1)
   
+  // API credentials for SDK execution (stored encrypted in production)
+  // { baseUrl: string, apiKey?: string, bearerToken?: string }
+  credentials Json?
+  
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
@@ -291,6 +296,8 @@ model AggregatorInstance {
   // Relations
   sourceActivities      ActivityExecution[] @relation(name: "SourceInstance")
   destinationActivities ActivityExecution[] @relation(name: "DestinationInstance")
+  sourceMappings        FieldMapping[] @relation(name: "MappingSource")
+  destinationMappings   FieldMapping[] @relation(name: "MappingDestination")
   
   @@unique([tenantId, name])
   @@index([tenantId, aggregatorId])
@@ -423,8 +430,77 @@ model SystemControlFlag {
 }
 
 // ============================================
+// FIELD MAPPINGS
+// ============================================
+
+// Field Mapping = AI-generated or manual field mappings between data sources
+model FieldMapping {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  name        String
+  description String?
+  
+  // Mapping type classification
+  type        MappingType @default(COLUMN)
+  
+  // Source configuration
+  sourceInstanceId    String?
+  sourceInstance      AggregatorInstance? @relation(name: "MappingSource", fields: [sourceInstanceId], references: [id], onDelete: SetNull)
+  sourceType          String    // "database", "sdk", "aggregator", "mini-connector"
+  sourceConnectorId   String?   // For mini-connector sources
+  sourceName          String    // Table name, endpoint name, or object name
+  sourceSchema        Json      // Discovered/parsed schema structure
+  
+  // Destination configuration
+  destinationInstanceId   String?
+  destinationInstance     AggregatorInstance? @relation(name: "MappingDestination", fields: [destinationInstanceId], references: [id], onDelete: SetNull)
+  destinationType         String  // "database", "sdk", "aggregator", "mini-connector"
+  destinationConnectorId  String? // For mini-connector destinations
+  destinationName         String  // Table name, endpoint name, or object name
+  destinationSchema       Json    // Target schema structure
+  
+  // AI-generated mapping rules
+  // Format: [{ sourceField, destinationField, transform, transformConfig, nullable, dataType }]
+  mappingRules        Json
+  
+  // Transformation code (for complex transformations)
+  transformCode       String?
+  
+  // Metadata
+  version             Int      @default(1)
+  isActive            Boolean  @default(true)
+  isGenerated         Boolean  @default(false)  // true if AI-generated
+  lastUsedAt          DateTime?
+  
+  // Validation status
+  isValidated         Boolean  @default(false)
+  validationErrors    Json?    // Array of validation issues
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  @@unique([tenantId, name])
+  @@index([tenantId, sourceInstanceId])
+  @@index([tenantId, destinationInstanceId])
+  @@index([tenantId, type])
+  @@index([tenantId, isActive])
+  @@map("field_mappings")
+}
+
+// ============================================
 // ENHANCED ENUMS
 // ============================================
+
+enum MappingType {
+  COLUMN          // Simple column-to-column mapping
+  FIELD           // API field mapping (SDK)
+  TRANSFORM       // Complex transformation mapping
+  AGGREGATOR      // Aggregator-specific mapping (e.g., Salesforce objects)
+  MINI_CONNECTOR  // Mini connector to cloud/SDK mapping
+  HYBRID          // Mixed source types
+}
 
 enum TenantTier {
   FREE

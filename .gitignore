@@ -95,6 +95,13 @@ docker-compose.override.yml
 .dynamodb/
 .tern-port
 
+# Electron
+apps/mini-connector/release/
+apps/mini-connector/dist/
+apps/*/dist/
+apps/*/release/
+!.apps/mini-connector/release/.gitkeep
+
 # TypeScript
 *.js.map
 *.d.ts.map

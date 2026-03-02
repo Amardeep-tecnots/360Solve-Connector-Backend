@@ -18,9 +18,24 @@ export interface ConnectionTester {
   test(config: Record<string, any>, credentials: Record<string, string>): Promise<any>;
 }
 
+export interface LoadDataInput {
+  tableName: string;
+  data: any[];
+  mode: 'insert' | 'upsert' | 'create';
+  conflictKey?: string[];
+  conflictResolution?: 'replace' | 'merge' | 'skip';
+  autoCreateTable?: boolean;
+}
+
+export interface LoadDataResult {
+  rowsLoaded: number;
+  errors?: Array<{ row: number; error: string }>;
+}
+
 export interface ConnectionHandler extends ConnectionTester {
   discoverSchema(config: Record<string, any>, credentials: Record<string, string>): Promise<SchemaDiscoveryResult>;
   previewTable(config: Record<string, any>, credentials: Record<string, string>, tableName: string, limit?: number): Promise<TablePreviewResult>;
+  loadData(config: Record<string, any>, credentials: Record<string, string>, input: LoadDataInput): Promise<LoadDataResult>;
 }
 
 export interface SchemaDiscoveryResult {
@@ -51,29 +66,48 @@ export interface TablePreviewResult {
 @Injectable()
 export class ConnectionFactoryService {
   private testers: Map<string, ConnectionTester>;
+  private handlers: Map<string, ConnectionHandler>;
 
   constructor(private prisma: PrismaService) {
+    // Map for testers (legacy support)
     this.testers = new Map([
-      ['agg-mysql', new MySQLConnection()],
-      ['agg-postgres', new PostgreSQLConnection()],
       ['agg-salesforce', new SalesforceConnection()],
       ['agg-bigquery', new BigQueryConnection()],
       ['agg-snowflake', new SnowflakeConnection()],
       ['agg-hubspot', new HubSpotConnection()],
-      // Legacy IDs for backward compatibility
-      ['mysql', new MySQLConnection()],
-      ['postgresql', new PostgreSQLConnection()],
+      // Legacy IDs
       ['salesforce', new SalesforceConnection()],
       ['bigquery', new BigQueryConnection()],
       ['snowflake', new SnowflakeConnection()],
       ['hubspot', new HubSpotConnection()],
     ]);
+
+    // Map for full handlers with loadData support
+    this.handlers = new Map<string, ConnectionHandler>([
+      ['agg-mysql', new MySQLConnection()],
+      ['agg-postgres', new PostgreSQLConnection()],
+      ['mysql', new MySQLConnection()],
+      ['postgresql', new PostgreSQLConnection()],
+    ]);
   }
 
   async getTester(aggregatorId: string): Promise<ConnectionTester> {
-    // First check if we have a hardcoded tester
+    // First check handlers (they also implement ConnectionTester)
+    if (this.handlers.has(aggregatorId)) {
+      return this.handlers.get(aggregatorId)!;
+    }
+    // Then check testers
     if (this.testers.has(aggregatorId)) {
       return this.testers.get(aggregatorId)!;
+    }
+    // Look up from aggregator
+    return this.getHandler(aggregatorId);
+  }
+
+  async getHandler(aggregatorId: string): Promise<ConnectionHandler> {
+    // First check if we have a hardcoded handler
+    if (this.handlers.has(aggregatorId)) {
+      return this.handlers.get(aggregatorId)!;
     }
 
     // Otherwise, look up the aggregator and determine connection type
@@ -92,23 +126,23 @@ export class ConnectionFactoryService {
     }
 
     if (aggregator.category === 'CRM') {
-      return new SalesforceConnection();
+      return new SalesforceConnection() as unknown as ConnectionHandler;
     }
 
     if (aggregator.category === 'Data Warehouse') {
-      if (aggregatorId.includes('snowflake')) return new SnowflakeConnection();
-      if (aggregatorId.includes('bigquery')) return new BigQueryConnection();
+      if (aggregatorId.includes('snowflake')) return new SnowflakeConnection() as unknown as ConnectionHandler;
+      if (aggregatorId.includes('bigquery')) return new BigQueryConnection() as unknown as ConnectionHandler;
     }
 
     // Default: try to determine from ID
     const id = aggregatorId.toLowerCase();
     if (id.includes('mysql')) return new MySQLConnection();
     if (id.includes('postgres')) return new PostgreSQLConnection();
-    if (id.includes('salesforce')) return new SalesforceConnection();
-    if (id.includes('bigquery')) return new BigQueryConnection();
-    if (id.includes('snowflake')) return new SnowflakeConnection();
-    if (id.includes('hubspot')) return new HubSpotConnection();
+    if (id.includes('salesforce')) return new SalesforceConnection() as unknown as ConnectionHandler;
+    if (id.includes('bigquery')) return new BigQueryConnection() as unknown as ConnectionHandler;
+    if (id.includes('snowflake')) return new SnowflakeConnection() as unknown as ConnectionHandler;
+    if (id.includes('hubspot')) return new HubSpotConnection() as unknown as ConnectionHandler;
 
-    throw new Error(`No connection tester implemented for aggregator: ${aggregatorId}`);
+    throw new Error(`No connection handler implemented for aggregator: ${aggregatorId}`);
   }
 }

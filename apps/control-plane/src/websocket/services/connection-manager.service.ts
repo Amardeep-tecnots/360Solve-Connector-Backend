@@ -1,0 +1,191 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../../prisma.service';
+import { Socket } from 'socket.io';
+
+interface ConnectionInfo {
+  socketId: string;
+  socket: Socket;
+  tenantId: string;
+  connectorId: string;
+  apiKey: string;
+  ip: string;
+  userAgent: string;
+  connectedAt: Date;
+  lastHeartbeat: Date;
+  systemInfo?: any;
+  schema?: any;
+}
+
+@Injectable()
+export class ConnectionManagerService {
+  private readonly logger = new Logger(ConnectionManagerService.name);
+  private readonly connections = new Map<string, ConnectionInfo>();
+  private readonly HEARTBEAT_TIMEOUT = 90000; // 90 seconds
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async registerConnection(
+    client: Socket,
+    apiKey: string,
+    metadata: { ip: string; userAgent: string }
+  ): Promise<{ tenantId: string; connectorId: string } | null> {
+    const socketId = client.id;
+    
+    // Validate API key format first
+    const keyParts = apiKey.split('_');
+    if (keyParts.length !== 4 || keyParts[0] !== 'vmc') {
+      return null;
+    }
+
+    const tenantId = keyParts[1];
+
+    // Validate API key against database and find matching connector
+    const connectors = await (this.prisma as any).connector.findMany({
+      where: {
+        tenantId,
+        type: 'MINI',
+        status: { in: ['OFFLINE', 'ONLINE', 'BUSY'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const bcrypt = require('bcrypt');
+    let matchedConnector: { id: string } | null = null;
+
+    for (const connector of connectors) {
+      if (!connector.apiKeyHash) continue;
+      const isValid = await bcrypt.compare(apiKey, connector.apiKeyHash);
+      if (isValid) {
+        matchedConnector = { id: connector.id };
+        break;
+      }
+    }
+
+    if (!matchedConnector) {
+      this.logger.warn(`Invalid API key for tenant ${tenantId}`);
+      return null;
+    }
+
+    // Allow reconnection for the same connector (replace stale connection)
+    const existingSameConnector = Array.from(this.connections.values()).find(
+      (conn) => conn.connectorId === matchedConnector!.id,
+    );
+
+    if (existingSameConnector) {
+      this.logger.warn(`Replacing stale connection for connector ${matchedConnector.id} (old socket: ${existingSameConnector.socketId})`);
+      // Remove the old stale connection to allow reconnection
+      this.connections.delete(existingSameConnector.socketId);
+    }
+
+    // Store connection
+    this.connections.set(socketId, {
+      socketId,
+      socket: client,
+      tenantId,
+      connectorId: matchedConnector.id,
+      apiKey,
+      ip: metadata.ip,
+      userAgent: metadata.userAgent,
+      connectedAt: new Date(),
+      lastHeartbeat: new Date(),
+    });
+
+    this.logger.log(`Registered connection: ${socketId} for connector ${matchedConnector.id} / tenant ${tenantId}`);
+    return { tenantId, connectorId: matchedConnector.id };
+  }
+
+  async unregisterConnection(socketId: string): Promise<void> {
+    const connection = this.connections.get(socketId);
+    if (connection) {
+      this.connections.delete(socketId);
+      this.logger.log(`Unregistered connection: ${socketId}`);
+    }
+  }
+
+  async updateHeartbeat(socketId: string, data: any): Promise<void> {
+    const connection = this.connections.get(socketId);
+    if (connection) {
+      connection.lastHeartbeat = new Date();
+      connection.systemInfo = data;
+    }
+  }
+
+  async updateSchema(socketId: string, schema: any): Promise<void> {
+    const connection = this.connections.get(socketId);
+    if (connection) {
+      connection.schema = schema;
+      this.logger.log(`Schema updated for connection ${socketId}`);
+    }
+  }
+
+  getConnection(socketId: string): ConnectionInfo | undefined {
+    return this.connections.get(socketId);
+  }
+
+  getConnectionByConnectorId(connectorId: string): ConnectionInfo | undefined {
+    return Array.from(this.connections.values()).find(
+      (conn) => conn.connectorId === connectorId
+    );
+  }
+
+  getConnectionByTenant(tenantId: string): ConnectionInfo | undefined {
+    return Array.from(this.connections.values()).find(
+      (conn) => conn.tenantId === tenantId
+    );
+  }
+
+  getAllConnections(): ConnectionInfo[] {
+    return Array.from(this.connections.values());
+  }
+
+  getOnlineConnectors(tenantId: string): ConnectionInfo[] {
+    return Array.from(this.connections.values()).filter(
+      (conn) => conn.tenantId === tenantId
+    );
+  }
+
+  async checkOfflineConnectors(): Promise<string[]> {
+    const now = Date.now();
+    const offline: string[] = [];
+
+    for (const [socketId, connection] of this.connections.entries()) {
+      const timeSinceHeartbeat = now - connection.lastHeartbeat.getTime();
+
+      if (timeSinceHeartbeat > this.HEARTBEAT_TIMEOUT) {
+        offline.push(socketId);
+        this.connections.delete(socketId);
+        this.logger.warn(`Connector ${socketId} marked as offline (no heartbeat)`);
+      }
+    }
+
+    return offline;
+  }
+
+  async getConnectorStats(tenantId: string): Promise<{
+    online: number;
+    offline: number;
+    lastHeartbeat: Date | null;
+  }> {
+    const connections = this.getOnlineConnectors(tenantId);
+    const lastHeartbeat = connections.length > 0
+      ? connections.reduce((latest, conn) => 
+          conn.lastHeartbeat > latest ? conn.lastHeartbeat : latest, connections[0].lastHeartbeat)
+      : null;
+
+    return {
+      online: connections.length,
+      offline: 0, // TODO: Track offline connectors from database
+      lastHeartbeat,
+    };
+  }
+
+  // New method to send messages
+  sendMessage(socketId: string, event: string, data: any): boolean {
+    const connection = this.connections.get(socketId);
+    if (connection && connection.socket) {
+      connection.socket.emit(event, data);
+      return true;
+    }
+    return false;
+  }
+}

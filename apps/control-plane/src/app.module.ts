@@ -7,8 +7,14 @@ import { WorkflowsModule } from './workflows/workflows.module';
 import { AggregatorsModule } from './aggregators/aggregators.module';
 import { ExecutionsModule } from './executions/executions.module';
 import { ConnectorsModule } from './connectors/connectors.module';
+import { TenantsModule } from './tenants/tenants.module';
+import { UsersModule } from './users/users.module';
 import { PrismaService } from './prisma.service';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { WebsocketModule } from './websocket/websocket.module';
+import { StorageModule } from './storage/storage.module';
+import { AIModule } from './ai/ai.module';
+import { MappingsModule } from './mappings/mappings.module';
 
 @Module({
   imports: [
@@ -31,6 +37,12 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
     AggregatorsModule,
     ExecutionsModule,
     ConnectorsModule,
+    TenantsModule,
+    UsersModule,
+    WebsocketModule,
+    StorageModule,
+    AIModule,
+    MappingsModule,
   ],
   providers: [PrismaService, LoggingInterceptor],
   exports: [PrismaService],

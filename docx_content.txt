@@ -1,0 +1,829 @@
+
+CONNECTOR ECOSYSTEM
+Mini Connector Desktop Application
+Complete Product Specification & Architecture Plan
+On-Premise. Air-Gapped. Zero Credential Exposure.
+The bridge between local ERP systems and the cloud workflow engine — outbound-only, firewall-friendly, credential-isolated
+
+Version 3.0
+Status: Production Spec
+February 2026
+
+Covers: Desktop App Architecture • UI/UX Flows • WebSocket Protocol • Security Model • AI-Assisted Workflow Builder • Schema Discovery • Sync Matching
+
+1. Executive Overview
+The Mini Connector is a lightweight, on-premise desktop application that acts as the secure bridge between local ERP systems, databases, and the cloud-based Connector Console. It is the critical component that solves the fundamental problem of connecting systems that cannot expose themselves to the internet.
+
+1.1 The Core Problem It Solves
+Over 70% of SMB ERP systems are deployed on-premise with dynamic IPs, behind NAT firewalls, and with strict IT policies against inbound connections. The Mini Connector eliminates the need for static IPs, inbound firewall rules, or any credential sharing with the cloud. It flips the connection model entirely: instead of the cloud reaching into the customer's network, the Mini Connector reaches out.
+
+Traditional Integration Model
+Mini Connector Model
+Cloud platform connects inbound to ERP
+Mini Connector connects outbound to cloud
+Requires static IP + firewall port opening
+Only needs outbound HTTPS/WSS (port 443)
+Credentials stored on cloud servers
+Credentials NEVER leave customer premises
+Blocked by 70%+ of corporate firewalls
+Works through 99% of corporate proxies
+IT department must approve inbound rules
+IT only needs to allow standard outbound HTTPS
+Direct DB access from cloud = attack surface
+Zero inbound attack surface
+
+1.2 What the Desktop Application IS
+A persistent background service (system tray application) running on a Windows, macOS, or Linux machine inside the customer's network
+A secure outbound WebSocket client that registers with the cloud console using a unique API key
+A local query executor that runs read-only operations against local databases on behalf of cloud-orchestrated workflows
+A schema broadcaster that discovers and transmits metadata (table names, column types, relationships) to the cloud — never actual data until a workflow requests it
+A credential vault that encrypts database passwords using a machine-specific key, ensuring credentials cannot be extracted even if the binary is copied
+
+1.3 What the Desktop Application is NOT
+NOT a cloud-hosted service — it runs entirely on the customer's machine
+NOT a credential relay — database passwords are NEVER transmitted over the WebSocket
+NOT a full workflow engine — orchestration logic lives in the cloud; the desktop app only executes approved commands
+NOT a data aggregator — it does not cache or store data beyond transient query results that are immediately streamed and discarded
+
+The Golden Rule: Zero Credential Exposure
+The cloud console knows NOTHING about your database passwords.
+It only knows: (1) your API key, (2) your schema structure, (3) results from commands it sends.
+Every credential stays encrypted on the machine where the Mini Connector runs.
+Even Connector Console admins cannot retrieve your ERP passwords.
+
+2. System Architecture
+2.1 Three-Layer Ecosystem
+The full ecosystem operates across three distinct layers, each with clear boundaries and responsibilities. The Mini Connector desktop application sits at Layer 2, serving as the on-premise agent.
+
+Layer 1: Cloud Console (Control Plane)
+Aggregator Marketplace, Workflow Designer, AI SDK Generator, WebSocket Gateway
+Holds: API keys (hashed), schema metadata, workflow definitions, execution logs
+Does NOT hold: database credentials, plaintext API keys, raw customer data
+
+Layer 2: Mini Connector Desktop App (Execution Agent) ← THIS DOCUMENT
+On-premise binary running on customer's network
+Holds: encrypted DB credentials, machine-specific encryption key, local query cache
+Does NOT hold: cloud credentials, workflow definitions, other tenants' data
+
+Layer 3: Target Systems (Data Sources)
+SAP ERP, Tally, Oracle, MySQL, PostgreSQL, SQL Server, custom ERP systems
+Accessed only from the Mini Connector via local network (localhost or LAN IP)
+Never directly accessible from the cloud console
+
+2.2 Connection Flow Architecture
+The data flow is deliberately asymmetric. The Mini Connector always initiates the connection to the cloud, never the reverse. This is the fundamental security guarantee.
+
+Stage
+Direction
+Description
+1. Startup
+Mini Connector → Cloud
+App reads API key from encrypted config, initiates WSS connection to cloud gateway
+2. Authentication
+Cloud → Mini Connector
+Cloud validates API key hash, checks for duplicate connections, registers connection in Redis
+3. Schema Broadcast
+Mini Connector → Cloud
+App queries local INFORMATION_SCHEMA, sends table/column metadata (no data) to cloud
+4. Heartbeat
+Mini Connector → Cloud
+Every 30 seconds, sends status ping to maintain connection
+5. Command Receipt
+Cloud → Mini Connector
+Cloud sends approved query command with idempotency key
+6. Local Execution
+Internal only
+Mini Connector executes READ-ONLY query against local DB. No cloud involvement.
+7. Result Streaming
+Mini Connector → Cloud
+Encrypted result chunks streamed to cloud temp buffer (24h TTL, then auto-purged)
+8. Acknowledgment
+Cloud → Mini Connector
+Cloud confirms receipt, marks activity complete, removes buffer entry
+
+2.3 API Key Design
+Each Mini Connector instance is bound to exactly one API key. The key format encodes tenant identity, a random component, and a checksum for validation:
+
+vmc_<tenantId>_<randomSegment>_<checksum>   e.g.: vmc_abc123_x7f9k2p5w8q1_c4e2a
+
+One API key = one Mini Connector instance. Duplicate connection attempt = immediate rejection with error code DUPLICATE_CONNECTION.
+Keys are hashed (SHA-256 + salt) before storage in the cloud. Plaintext is shown only once at generation time.
+Keys can be instantly revoked from the cloud console, causing immediate disconnection of the corresponding Mini Connector.
+Key rotation is supported: generate new key, update Mini Connector config, old key auto-expires after 24 hours to allow graceful migration.
+
+3. Desktop Application: Product Specification
+This section defines the complete product experience for the Mini Connector desktop application, from installation through day-to-day operation. The application is designed to be invisible when running correctly, and clear and actionable when attention is needed.
+3.1 Application Modes
+
+Mode
+Description
+System Tray (Default)
+Runs silently in the background. Status icon indicates connection state. Right-click for controls.
+Dashboard Window
+Launched from tray or start menu. Shows connection status, live activity, logs, and configuration.
+Setup Wizard
+First-run experience. Guides through API key entry, database connection, and schema discovery.
+CLI Mode
+For server deployments and IT automation. Full feature parity with GUI via command-line flags.
+
+3.2 Installation & Setup Flow
+Step 1: Download & Install
+Single executable download from the cloud console's "Add Mini Connector" page
+Distributed as: mini-connector.exe (Windows), mini-connector (Linux), mini-connector.dmg (macOS)
+Binary is code-signed and checksum-verified to prevent tampering
+No runtime dependencies (Go single binary) — no Node.js, .NET, or Java required
+
+Step 2: First-Run Setup Wizard
+On first launch, the Setup Wizard opens automatically. It walks through exactly four steps:
+
+Step
+Title
+User Action
+System Action
+1
+Paste API Key
+Paste the API key from the cloud console
+Validates key format, checks cloud reachability
+2
+Name Your Connector
+Give this instance a friendly name (e.g. "Warehouse SAP")
+Stores name in local config, registers with cloud
+3
+Add Database Connection
+Select DB type, enter host/port/user/password
+Tests connection, enforces READ-ONLY, encrypts credentials
+4
+Schema Discovery
+Review discovered tables and approve
+Broadcasts schema metadata to cloud console
+
+Step 3: Background Service Registration
+On Windows: registers as a Windows Service (optional) via "Install as Service" button, enabling auto-start on boot without user login
+On macOS: registers as a LaunchAgent for auto-start on login
+On Linux: generates systemd unit file and provides install command
+
+3.3 System Tray Behavior
+The tray icon is the primary at-a-glance status indicator. Color and animation convey state without requiring the user to open any window:
+
+Icon State
+Meaning
+User Action Available
+Green (solid)
+Connected and idle
+None required
+Green (pulsing)
+Connected and executing a workflow command
+View progress in dashboard
+Yellow (solid)
+Connected, warning (e.g. schema change detected)
+Click to review and approve
+Red (solid)
+Disconnected (network error or cloud unreachable)
+Click to see error and retry
+Gray (solid)
+Paused manually
+Click to resume
+Blue (spinning)
+Reconnecting after drop
+Automatic, no action needed
+
+Right-click context menu on the tray icon exposes: Open Dashboard, Pause/Resume, View Last Activity, Reconnect, and Exit. Exit requires confirmation to prevent accidental disconnection during active workflows.
+
+3.4 Main Dashboard Window
+The dashboard is a single-window application with a left navigation sidebar and a main content area. It follows a clean, data-dense layout inspired by premium SaaS monitoring tools.
+
+3.4.1 Dashboard Sections
+
+Section
+Content
+Overview (Home)
+Connection status card, last activity summary, uptime counter, bytes transferred today, pending commands count
+Activity Log
+Real-time feed of commands received, execution status, duration, rows returned. Filterable by date, status, and workflow name.
+Connections
+List of configured database connections. Status indicator per connection. Add, edit, test, and remove connections.
+Schema Browser
+Tree view of all discovered schemas. Tables expandable to show columns, types, and sample values (local only). "Re-sync" button.
+Settings
+API key management, connector name, update settings, proxy configuration, log verbosity, auto-start toggle
+Diagnostics
+WebSocket connection health, latency graph, error log, export diagnostic bundle for support
+
+3.5 The Connections Manager (Core UX)
+The Connections Manager is the most security-critical UI in the application. It must make clear that credentials never leave the device while remaining easy to use for non-technical users.
+
+3.5.1 Adding a New Connection
+Click "Add Connection" in the Connections section
+Select database type from a dropdown (MySQL, PostgreSQL, SQL Server, Oracle, SQLite, MongoDB, Tally, SAP HANA)
+Enter connection parameters: Host, Port, Database Name, Username, Password
+Optionally toggle "Use Connection String" for advanced users
+Click "Test Connection" — the app connects locally and returns success/failure with a specific error message
+On success, click "Save" — credentials are encrypted with the machine-specific key and stored in the local vault
+Schema discovery runs automatically and the discovered tables are shown for review
+
+Security Notice Displayed to Users During Connection Setup
+Your database credentials are encrypted and stored only on this device.
+They will never be transmitted to the cloud console or any external server.
+The cloud only receives table names and column metadata, not your data or passwords.
+You can verify this by reviewing all outbound traffic: only WSS connections to connector.[domain] are made.
+
+3.5.2 READ-ONLY Enforcement Layers
+The application enforces read-only access at three independent layers. All three must be bypassed simultaneously for a write to succeed — a near-impossible condition in normal operation:
+
+Layer
+Mechanism
+Behavior on Write Attempt
+Layer 1: Command Validation
+Mini Connector parses every incoming query command before execution, using a simple SQL AST parser
+Command rejected with error WRITE_OPERATION_REJECTED before any DB connection is made
+Layer 2: Connection-Level
+Database connections are established with a read-only user (best practice) or with the READ ONLY session flag set
+Database itself rejects the write. Error logged and returned to cloud.
+Layer 3: Regex Pre-filter
+Fast regex check for INSERT/UPDATE/DELETE/DROP/TRUNCATE/CREATE keywords before parsing
+Immediate rejection with code WRITE_KEYWORD_DETECTED
+
+4. Schema Discovery & Browser
+Schema discovery is one of the most important features the Mini Connector provides to the cloud console. Without understanding the structure of a local database, the cloud-side workflow builder and AI sync matcher cannot function. Schema metadata is the only data that flows continuously — actual row data only flows when a workflow explicitly requests it.
+4.1 What Schema Discovery Sends
+
+Transmitted to Cloud
+NEVER Transmitted
+Table names
+Row data (customer records, transactions, etc.)
+Column names and data types
+Database credentials (username/password)
+Nullable flags and default values
+Connection strings
+Primary key definitions
+Index internals or execution plans
+Foreign key relationships
+Stored procedure source code
+Row count estimates (for large table warnings)
+Any PII or business-sensitive data
+Enum values (for dropdown suggestions in the UI)
+
+
+4.2 Discovery Mechanisms by Database Type
+
+Database Type
+Discovery Mechanism
+MySQL / MariaDB
+SELECT from INFORMATION_SCHEMA.COLUMNS, TABLES, KEY_COLUMN_USAGE
+PostgreSQL
+SELECT from information_schema.columns and pg_catalog tables
+SQL Server
+SELECT from sys.tables, sys.columns, sys.foreign_keys
+Oracle
+SELECT from ALL_TABLES, ALL_TAB_COLUMNS, ALL_CONSTRAINTS
+SQLite
+PRAGMA table_list and PRAGMA table_info per table
+MongoDB
+Sample 100 documents per collection to infer schema
+Tally ERP
+Query Tally XML gateway for entity definitions
+SAP HANA
+SELECT from SYS.TABLES and SYS.TABLE_COLUMNS
+
+4.3 Schema Browser (Local UI)
+The Schema Browser in the dashboard gives the user a local view of all discovered schema metadata before it is shared with the cloud. Users can:
+Expand any table to see all columns with their data types and nullable status
+See a sample of values from each column (fetched locally, shown locally, never transmitted)
+Mark specific columns or entire tables as "Private" to exclude them from cloud schema sharing
+Trigger a manual re-discovery if the database schema has changed
+Compare the current schema against the last-synced cloud version to see what has changed
+
+Schema Privacy Controls
+Tables marked PRIVATE: schema is not shared with the cloud console.
+Columns marked PRIVATE: column name and type excluded from cloud metadata.
+Workflows that reference a private table or column will fail with a SCHEMA_ACCESS_DENIED error.
+This gives customers full control over what the workflow builder can see and work with.
+
+5. Local Workflow Execution Engine
+When the cloud console's orchestration engine triggers a workflow step that requires data from a local source, it sends a command to the Mini Connector via the persistent WebSocket. The Mini Connector's local execution engine handles the full lifecycle of that command.
+5.1 Command Lifecycle
+
+Phase
+What Happens
+Error Handling
+Receipt
+Command arrives with commandId, executionId, activityId, and idempotency key
+Malformed commands rejected with schema error
+Deduplication
+Check local SQLite for this idempotency key. If seen, return cached result immediately.
+Prevents double-execution on network retry
+Validation
+Parse SQL for write operations, check table/column against approved schema, verify command has not expired
+Validation failure returned to cloud with specific error code
+Execution
+Execute parameterized query against local database via connection pool
+DB errors captured, timeout enforced (default 30s, configurable)
+Streaming
+Results chunked (default 1MB chunks) and streamed to cloud buffer endpoint via HTTPS
+Failed chunk upload: retry with exponential backoff (max 3 attempts)
+Acknowledgment
+Send execution_result message via WebSocket with result metadata
+Cloud marks activity complete and releases buffer entry
+
+5.2 Offline Queue
+When the WebSocket connection to the cloud is interrupted, the Mini Connector does not lose commands. An offline queue backed by SQLite on disk ensures no work is lost:
+Incoming commands received before connection drops are queued to local SQLite with a timestamp and retry count
+Commands queued in the cloud while the Mini Connector is offline are held in the cloud command queue with TTL
+On reconnection, the Mini Connector immediately processes its offline queue, then requests any cloud-side queued commands
+Commands that exceed their TTL (configurable, default 4 hours) are marked as EXPIRED and a notification is sent to the workflow owner
+
+5.3 Connection Pool Management
+The Mini Connector maintains a connection pool per configured database to avoid the overhead of creating new connections for every query:
+
+Pool Parameter
+Default Value / Behavior
+Pool size
+2 to 10 connections (auto-scales based on command queue depth)
+Connection lifetime
+30 minutes (refreshed to prevent stale connections)
+Idle timeout
+5 minutes (connections released back to pool)
+Acquire timeout
+10 seconds (fail fast if pool is exhausted)
+Health check
+SELECT 1 ping every 2 minutes to keep connections alive
+On error
+Failed connection removed from pool, new one created, error logged
+
+5.4 WebSocket Protocol Details
+The Mini Connector implements a strict message protocol over WSS. All messages are JSON-encoded.
+
+Messages Sent by Mini Connector (Outbound)
+
+Message Type
+When Sent / Key Fields
+heartbeat
+Every 30 seconds. Fields: type, timestamp, status (ready/busy/error), activeCommands count
+auth
+On connection. Fields: type, apiKey (sent once, then key discarded from active memory)
+schema_discovery
+On startup and when re-sync triggered. Fields: type, schema (tables/columns metadata), timestamp
+execution_result
+After completing a command. Fields: type, commandId, executionId, activityId, result (bufferKey or inline data), rowCount, durationMs
+execution_error
+On command failure. Fields: type, commandId, error.code, error.message, error.retryable
+status
+On state change. Fields: type, status (ready/busy/offline/error), reason
+
+Messages Received by Mini Connector (Inbound)
+
+Message Type
+When Received / Key Fields
+connected
+Confirmation from cloud after auth. Fields: tenantId, connectorName, serverTime
+command
+Query to execute. Fields: commandId, executionId, activityId, operation, payload (query, params, timeout, idempotencyKey)
+cancel
+Cancel an in-progress command. Fields: executionId, reason
+schema_request
+Cloud requests a fresh schema re-discovery
+shutdown
+Graceful shutdown signal. Fields: reason, gracePeriod (ms)
+error
+Cloud-side error. Fields: code (DUPLICATE_CONNECTION, AUTH_FAILED, etc.), message
+
+6. AI-Assisted Workflow Builder Integration
+The Mini Connector's schema discovery output directly feeds the cloud-side workflow builder and AI sync matcher. This section describes the full integration from schema to AI-suggested transformation mapping.
+6.1 Schema-to-Workflow Pipeline
+
+Stage
+Actor
+Output
+1. Schema Discovery
+Mini Connector
+JSON schema with tables, columns, types, relationships
+2. Schema Registration
+Cloud Console
+Schema stored in aggregator registry, versioned, diffed against previous
+3. Schema Indexing
+AI Engine
+Semantic understanding of column purposes (e.g. "email", "phone", "currency")
+4. Workflow Builder Exposure
+Cloud UI
+User sees their local DB tables and columns as draggable source nodes
+5. AI Sync Suggestion
+AI Engine
+Suggests mappings between source columns and destination columns based on semantic similarity
+6. User Verification
+User
+Reviews AI suggestions, approves, modifies, or rejects each mapping
+7. Mapping Persistence
+Cloud Console
+Approved mappings saved as workflow transformation rules
+
+6.2 The AI Sync Matcher
+When a user creates a workflow that maps data from one system to another, the AI Sync Matcher analyzes both source and destination schemas and proposes column mappings. The user always has final approval.
+
+How the AI Matches Columns
+Name similarity: "customer_email" in source matches "email_address" in destination with high confidence
+Type compatibility: INT source column cannot map to TEXT destination without transformation
+Semantic understanding: "dob", "date_of_birth", "birthday" are understood as the same concept
+Context clues: A column in a "customers" table named "id" is a primary key; a column named "customer_id" in an "orders" table is a foreign key pointing to it
+Historical patterns: Past workflow configurations from the same user or similar industry tenants inform better suggestions
+
+Confidence Levels Shown to User
+
+Confidence Level
+Displayed As
+User Action Required
+High (>90%)
+Green checkmark, pre-selected
+Can accept with one click or review in detail
+Medium (60-90%)
+Yellow indicator, shown but not pre-selected
+Review and confirm or reject
+Low (<60%)
+Red indicator, flagged for attention
+Must explicitly assign or mark as unmapped
+No match found
+Orange warning, unassigned
+User must manually drag-and-drop or skip
+
+6.3 Transformation Rules
+After matching columns, users may need to define transformations. The workflow builder provides both AI-suggested and manually configurable transformation functions:
+
+Transformation Type
+Example Use Case
+Type cast
+VARCHAR "100.50" → DECIMAL 100.50
+Date format conversion
+"DD/MM/YYYY" → "YYYY-MM-DD" ISO 8601
+String concatenation
+"first_name" + " " + "last_name" → "full_name"
+String split
+"full_name" → "first_name", "last_name"
+Lookup/enum mapping
+Status code "A" → "Active", "I" → "Inactive"
+Null handling
+NULL → default value, or skip record if NULL
+Formula
+unit_price * quantity = total (computed column)
+Custom JavaScript (sandboxed)
+Complex business logic in WASM sandbox
+
+6.4 SDK Generation (Future Phase)
+For ERP systems or custom APIs that do not have native database access, the AI SDK Generator creates a typed TypeScript SDK from API documentation. The Mini Connector can load and execute these SDKs in a WASM sandbox as an alternative to direct DB queries.
+
+SDK Generation Flow (Deferred to Phase 2)
+1. User provides API documentation URL or uploads OpenAPI spec / PDF manual
+2. AI reads documentation, extracts endpoints, auth methods, request/response schemas
+3. AI generates TypeScript SDK with typed methods (e.g. getCustomers(), createOrder())
+4. SDK compiled to WASM binary, security-scanned, registered in the Aggregator Marketplace
+5. Workflow builder can use SDK methods as source/destination nodes
+6. SDK execution runs in WASM sandbox inside the Mini Connector — same READ-ONLY enforcement applies
+
+7. Security Architecture
+7.1 Credential Vault
+Database credentials entered by the user are encrypted before being written to disk and are decrypted only in memory at the moment of connection establishment.
+
+Security Property
+Implementation
+Encryption algorithm
+AES-256-GCM with per-credential IV
+Key derivation
+Machine-specific key derived from hardware ID + OS install UUID + app salt using PBKDF2 (600,000 iterations)
+Key storage
+Derived key never written to disk. Re-derived on each app startup.
+Vault file location
+Platform-specific secure storage directory (AppData/Roaming on Windows, ~/.config on Linux, ~/Library/Application Support on macOS)
+Binary protection
+Vault file uses machine-specific encryption — copying the file to another machine produces undecryptable data
+Memory clearing
+Plaintext credentials zeroed in memory immediately after connection established
+
+7.2 Transport Security
+All cloud communication uses WSS (WebSocket Secure) over TLS 1.3 minimum
+Certificate pinning is supported for high-security deployments (enterprise tier)
+Custom CA certificates can be configured for environments behind SSL inspection proxies
+The WebSocket connection is compressed (permessage-deflate) to reduce bandwidth
+All data chunks sent to the cloud buffer endpoint use HTTPS with per-chunk HMAC validation
+
+7.3 Access Control
+Access Control Item
+Implementation
+API key storage
+Stored in OS credential manager (Windows Credential Vault, macOS Keychain, libsecret on Linux) — NOT in plain config files
+UI access
+Dashboard can optionally require a local PIN for sensitive operations (view credentials, modify connections)
+Audit log
+Every command received and executed is logged locally with timestamp, commandId, and row count. Never purged automatically.
+Cloud-side RBAC
+Cloud console enforces which workflow can send commands to which Mini Connector. A connector is only accessible to its registered tenant.
+
+7.4 The Four-Layer READ-ONLY Stack
+
+#
+Layer
+Method
+Bypass Probability
+1
+Regex Pre-filter
+Reject commands containing INSERT/UPDATE/DELETE/DROP/TRUNCATE/CREATE keywords
+Extremely Low
+2
+SQL AST Parser
+Parse query into abstract syntax tree, allow only SELECT operations
+Very Low
+3
+DB Session Flag
+SET SESSION TRANSACTION READ ONLY (MySQL) / SET default_transaction_read_only (PG)
+Low
+4
+DB User Permission
+Recommended: use a read-only DB user with SELECT-only grants
+Minimal (external)
+
+8. Diagnostics & Observability
+8.1 Local Diagnostic Panel
+The Diagnostics section in the dashboard gives users and IT staff a real-time view of the connector's health without needing to involve cloud support:
+
+Diagnostic Tool
+What It Shows
+WebSocket Health
+Connection state, latency (ms), reconnect count, last message timestamp
+Database Health
+Per-connection status, last query time, pool utilization, error rate
+Command Queue
+Pending commands, offline queue depth, last executed command details
+Bandwidth Usage
+Bytes sent/received today, per-workflow data volumes
+Error Log
+Last 100 errors with full stack traces, filterable by type and time
+Latency Graph
+5-minute rolling graph of round-trip command latency
+
+8.2 Diagnostic Bundle Export
+When a user needs support from the Connector Console team, they can export a diagnostic bundle — a ZIP file containing sanitized logs and configuration metadata (never credentials):
+Last 24 hours of connection logs
+Last 50 command execution records (query text redacted, row counts included)
+System information (OS, memory, CPU, network configuration)
+Current schema metadata
+Error log with stack traces
+
+What the Diagnostic Bundle NEVER Contains
+Database credentials, passwords, or API keys
+Actual row data from any query results
+The machine-specific encryption key
+Private column or table data marked as excluded
+
+8.3 Alerting & Notifications
+The Mini Connector can send notifications through configurable channels when important events occur:
+
+Event
+Default Notification Method
+Connection lost for > 5 minutes
+Desktop notification + email (if configured)
+Workflow command failed
+Desktop notification, visible in cloud console activity log
+Schema change detected
+Desktop notification, prompts for re-sync approval
+API key revoked remotely
+Desktop notification, app enters disconnected state
+New version available
+In-app banner in dashboard
+Disk space warning (offline queue)
+Desktop notification if queue size exceeds 500MB
+
+9. Multi-Connector & Enterprise Deployment
+9.1 Multiple Mini Connectors Per Account
+A single cloud console tenant can have multiple Mini Connector instances. This is common in enterprise scenarios where different departments, locations, or server environments each have their own connector:
+
+Scenario
+Mini Connector Configuration
+Headquarters SAP + Regional MySQL
+Two connectors, each with unique API key and name ("HQ SAP" and "Regional DB")
+DEV / STAGING / PROD isolation
+Three connectors pointing to different DB environments, each scoped to specific workflows
+Multiple ERP types
+One connector per ERP system, workflows can chain data across connectors
+
+From the cloud console workflow builder, each Mini Connector appears as a named data source node. The workflow designer can use any combination of cloud aggregators and Mini Connectors in a single workflow.
+
+9.2 Headless / Server Deployment (CLI Mode)
+For server environments where a GUI is not available, the Mini Connector offers full CLI operation:
+
+# Configure and start via CLImini-connector configure --api-key vmc_abc123_... --name "Prod SAP"mini-connector db add --type mysql --host localhost --port 3306 --db erp --user readonly --passwordmini-connector start --daemon# Install as system servicesudo mini-connector service installsudo systemctl enable --now vansales-mini-connector
+
+9.3 Update Mechanism
+Update Channel
+Description
+Auto-update (default)
+Mini Connector checks for updates on startup and weekly. Downloads and installs in background with user notification.
+Manual update
+User downloads new binary from console, replaces old binary. Config and vault are preserved.
+Enterprise / Air-gapped
+Offline update package downloadable from console. Deployed via IT tooling (SCCM, Ansible, etc.)
+
+10. Implementation Roadmap
+10.1 Phase 1: Foundation (Months 1–3)
+
+Phase 1 Deliverable: Working Mini Connector MVP
+Month 1: WebSocket client, API key auth, heartbeat, connection registry (cloud-side)
+Month 2: Local credential vault, DB connection manager, READ-ONLY enforcement, schema discovery
+Month 3: Command executor, result streaming, offline queue, reconnection logic, tray app UI
+End of Phase 1: Can connect Mini Connector to cloud, discover schema, and execute a manual query command
+
+10.2 Phase 2: Workflow Builder Integration (Months 4–6)
+
+Phase 2 Deliverable: End-to-End Workflow Execution
+Month 4: Schema-to-workflow-builder pipeline, AI sync matcher (basic column matching)
+Month 5: Full workflow designer UI with Mini Connector as source/destination node
+Month 6: Transformation rules engine, user verification UX, beta with 5 customers
+End of Phase 2: User can build a complete workflow from a local ERP to a cloud destination with AI-suggested mappings
+
+10.3 Phase 3: AI SDK & Production Hardening (Months 7–12)
+
+Phase 3 Deliverable: Production-Grade, SOC 2 Ready
+Month 7–8: AI SDK generator, WASM sandbox for SDK execution in Mini Connector
+Month 9–10: Security hardening, penetration testing, SOC 2 Type II audit begins
+Month 11–12: Performance optimization, multi-region, enterprise features, GA launch
+End of Phase 3: Supporting 50+ customers, 5000+ connectors, 10,000+ workflows/day
+
+10.4 Technology Stack
+
+Component
+Technology Decision
+Mini Connector (MVP)
+Node.js + TypeScript — same codebase as cloud, faster initial development
+Mini Connector (Production)
+Go — single ~10MB binary, no runtime needed, excellent WebSocket support, fast startup
+Local DB drivers
+mysql2 (MySQL/MariaDB), pg (PostgreSQL), mssql (SQL Server), oracledb (Oracle)
+Credential vault
+AES-256-GCM via Node.js crypto / Go crypto/aes. OS keyring for API key storage.
+Local queue
+SQLite via better-sqlite3 (Node.js) / mattn/go-sqlite3 (Go)
+Tray application
+Electron (Node.js) or Tauri (Go/Rust) for desktop GUI. Plain binary + CLI for headless.
+Cloud console
+NestJS (TypeScript), PostgreSQL, Redis, BullMQ
+AI engine
+Anthropic Claude Sonnet 4 for schema matching and SDK generation
+
+10.5 Success Metrics
+
+Milestone
+Timing
+KPI
+Target
+MVP
+Month 6
+Beta connectors deployed
+5+
+MVP
+Month 6
+DB types supported
+3 (MySQL, PG, MSSQL)
+MVP
+Month 6
+WS command latency
+< 5 seconds
+Production
+Month 12
+Paying customers
+50+
+Production
+Month 12
+Connectors deployed
+5,000+
+Production
+Month 12
+Workflows per day
+10,000+
+Production
+Month 12
+Uptime
+99.9%
+Scale
+Month 18
+Customers
+200+
+Scale
+Month 18
+Connectors
+50,000+
+Scale
+Month 18
+ERP types supported
+20+
+
+11. Risk Register
+11.1 Technical Risks
+
+Risk
+Probability
+Impact
+Mitigation
+WebSocket connection instability in restricted corporate networks
+Medium
+High
+HTTP tunneling fallback, custom proxy configuration, detailed connection diagnostics
+READ-ONLY enforcement bypass via SQL injection in command parameters
+Low
+Critical
+Parameterized queries enforced, multi-layer validation, WASM sandbox for user-provided code
+Mini Connector binary reverse-engineering to extract vault key
+Low
+High
+Machine-specific key derivation, key never stored on disk, code obfuscation
+Schema discovery fails for non-standard ERP databases
+Medium
+Medium
+Manual schema entry fallback, community-contributed adapters, expandable adapter system
+Offline queue fills disk during extended outage
+Low
+Medium
+Configurable queue size limit, automatic oldest-first purge, disk usage alert
+Go binary does not compile for customer's specific OS/architecture
+Low
+Low
+Pre-built binaries for Windows (x64/arm64), Linux (x64/arm64), macOS (x64/arm64)
+
+11.2 Security Risks
+
+Risk
+Probability
+Impact
+Mitigation
+Malicious Mini Connector binary distributed (supply chain)
+Low
+Critical
+Code signing (Windows EV cert, Apple notarization), SHA-256 checksums published, download only from official console
+Customer uses root DB credentials instead of read-only user
+High
+Medium
+Warn in UI, detect if root and prompt to create read-only user, enforce session-level READ ONLY regardless
+API key leaked in logs or screenshots
+Medium
+High
+Mask API key in all UI displays, warn against sharing diagnostic bundles without review
+Man-in-the-middle attack on WebSocket connection
+Low
+Critical
+TLS 1.3 minimum, optional certificate pinning, HSTS for update server
+
+11.3 Business Risks
+
+Risk
+Probability
+Impact
+Mitigation
+Customer IT refuses to install third-party binary
+Medium
+High
+Open-source the Mini Connector code, provide source-build instructions, SOC 2 certification, IT-friendly documentation
+Customer database schema changes break existing workflows
+High
+Medium
+Schema change detection, email notification to workflow owners, grace period before deprecation
+Connector Console competitor releases on-premise agent first
+Medium
+Medium
+Accelerate Phase 1 timeline, prioritize distribution and frictionless install
+
+Appendix: Quick Reference
+A. Supported Database Types (Phase 1)
+MySQL 5.7+ and MariaDB 10.3+
+PostgreSQL 11+
+Microsoft SQL Server 2016+
+
+Phase 2 Additions
+Oracle Database 12c+
+MongoDB 4.4+
+SQLite 3.x
+
+Phase 3 / Community
+Tally ERP (XML gateway)
+SAP HANA
+Custom ODBC connections
+
+B. Configuration File Structure
+The Mini Connector stores non-sensitive configuration in a plain JSON file. Credentials are stored separately in the encrypted vault.
+
+{ "connectorName": "Warehouse SAP", "apiKeyRef": "keychain://vansales/apikey","cloudUrl": "wss://connector.[domain]/ws", "heartbeatIntervalMs": 30000,"commandTimeoutMs": 30000, "offlineQueueMaxMB": 500,"logLevel": "info", "autoUpdate": true, "proxyUrl": null }
+
+C. Error Code Reference
+
+Error Code
+Meaning & Resolution
+AUTH_FAILED
+API key invalid or revoked. Generate a new key from the cloud console.
+DUPLICATE_CONNECTION
+This API key is already connected from another machine. Stop the other instance or generate a new key.
+WRITE_OPERATION_REJECTED
+Command contained a write operation (INSERT/UPDATE/etc). Only SELECT queries are permitted.
+SCHEMA_ACCESS_DENIED
+Command referenced a table or column marked as Private. Review schema privacy settings.
+QUERY_TIMEOUT
+Query exceeded the configured timeout. Increase timeout or optimize the query.
+CONNECTION_POOL_EXHAUSTED
+All DB connections in use. Reduce concurrent workflow executions or increase pool size.
+COMMAND_EXPIRED
+Command TTL expired before execution (connector was offline). Retry the workflow.
+VAULT_DECRYPT_ERROR
+Credential vault cannot be decrypted (machine key mismatch). Re-enter DB credentials.

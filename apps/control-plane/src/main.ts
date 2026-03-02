@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import * as bodyParser from 'body-parser';
 import { AppModule } from './app.module';
 import { LoggerService } from '@360solve/shared';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -15,6 +16,10 @@ async function bootstrap() {
   // Use our custom logger
   app.useLogger(logger);
 
+  // Increase body parser limit to handle large requests (e.g., SDK generation with large OpenAPI specs)
+  app.use(bodyParser.json({ limit: '100mb' }));
+  app.use(bodyParser.urlencoded({ limit: '100mb', extended: true }));
+
   // Global logging interceptor
   const loggingInterceptor = app.get(LoggingInterceptor);
   app.useGlobalInterceptors(loggingInterceptor);
@@ -26,9 +31,10 @@ async function bootstrap() {
     forbidNonWhitelisted: true,
   }));
 
-  // CORS for frontend
+  // CORS for frontend - allow network access in development
+  const corsOrigin = process.env.CORS_ORIGIN || process.env.FRONTEND_URL || true;
   app.enableCors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: corsOrigin,
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'X-Correlation-Id'],
   });
@@ -52,7 +58,7 @@ async function bootstrap() {
   });
 
   const port = process.env.PORT || 3001;
-  await app.listen(port);
+  await app.listen(port, '0.0.0.0');
 
   logger.info('🚀 Control Plane started', {
     port,

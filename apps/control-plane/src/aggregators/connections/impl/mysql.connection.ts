@@ -1,4 +1,4 @@
-import { ConnectionHandler, SchemaDiscoveryResult, TablePreviewResult } from '../connection-factory.service';
+import { ConnectionHandler, SchemaDiscoveryResult, TablePreviewResult, LoadDataInput, LoadDataResult } from '../connection-factory.service';
 
 export class MySQLConnection implements ConnectionHandler {
   async test(config: Record<string, any>, credentials: Record<string, string>): Promise<any> {
@@ -191,6 +191,249 @@ export class MySQLConnection implements ConnectionHandler {
       };
     } finally {
       await connection.end();
+    }
+  }
+
+  /**
+   * Infer MySQL column type from JavaScript value
+   */
+  private inferMySqlType(value: any): string {
+    if (value === null || value === undefined) {
+      return 'TEXT';
+    }
+    
+    const type = typeof value;
+    
+    if (type === 'number') {
+      return Number.isInteger(value) ? 'INT' : 'DECIMAL(15,2)';
+    }
+    if (type === 'boolean') {
+      return 'TINYINT(1)';
+    }
+    if (type === 'object') {
+      if (value instanceof Date) {
+        return 'DATETIME';
+      }
+      // Check for ISO date string
+      if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+        return 'DATETIME';
+      }
+      // Check for JSON object
+      return 'JSON';
+    }
+    return 'VARCHAR(255)';
+  }
+
+  /**
+   * Create table if it doesn't exist, based on the data schema
+   */
+  private async createTableIfNotExists(
+    connection: any,
+    database: string,
+    tableName: string,
+    data: any[]
+  ): Promise<boolean> {
+    if (!data || data.length === 0) {
+      return false;
+    }
+
+    const columns = Object.keys(data[0]);
+    if (columns.length === 0) {
+      return false;
+    }
+
+    // Check if table already exists
+    const [tables] = await connection.execute(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+      [database, tableName]
+    );
+    
+    if (Array.isArray(tables) && tables.length > 0) {
+      return false; // Table already exists
+    }
+
+    // Build CREATE TABLE statement
+    const columnDefs = columns.map(col => {
+      // Get a sample value to infer type
+      const sampleValue = data.find(row => row[col] !== undefined && row[col] !== null)?.[col];
+      const mysqlType = this.inferMySqlType(sampleValue);
+      return `\`${col}\` ${mysqlType}`;
+    });
+
+    const createQuery = `CREATE TABLE \`${tableName}\` (${columnDefs.join(', ')});`;
+    
+    await connection.execute(createQuery);
+    return true; // Table was created
+  }
+
+  async loadData(
+    config: Record<string, any>,
+    credentials: Record<string, string>,
+    input: LoadDataInput
+  ): Promise<LoadDataResult> {
+    const host = config.host || credentials.host;
+    const port = config.port || credentials.port || 3306;
+    const user = credentials.username || credentials.user;
+    const password = credentials.password;
+    const database = config.database || credentials.database;
+
+    const mysql = await import('mysql2/promise');
+    const connection = await mysql.createConnection({
+      host,
+      port,
+      user,
+      password,
+      database,
+      connectTimeout: 60000, // Longer timeout for bulk inserts
+    });
+
+    const { tableName, data, mode, conflictKey, conflictResolution, autoCreateTable } = input;
+
+    // Validate table name to prevent SQL injection
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+      await connection.end();
+      throw new Error('Invalid table name');
+    }
+
+    if (!data || data.length === 0) {
+      await connection.end();
+      return { rowsLoaded: 0 };
+    }
+
+    try {
+      // Get columns from the first row
+      const columns = Object.keys(data[0]);
+      if (columns.length === 0) {
+        return { rowsLoaded: 0 };
+      }
+
+      // Auto-create table if it doesn't exist (if enabled)
+      const tableCreated = autoCreateTable ? await this.createTableIfNotExists(connection, database, tableName, data) : false;
+      if (tableCreated) {
+        console.log(`[MySQL] Auto-created table "${tableName}" based on source data schema`);
+      }
+
+      const errors: Array<{ row: number; error: string }> = [];
+      let rowsLoaded = 0;
+
+      if (mode === 'insert') {
+        // Simple INSERT for each row
+        for (let i = 0; i < data.length; i++) {
+          const row = data[i];
+          const columnNames = columns.map(col => `\`${col}\``).join(', ');
+          const placeholders = columns.map((_, idx) => '?').join(', ');
+          const values = columns.map(col => row[col]);
+
+          const query = `INSERT INTO \`${tableName}\` (${columnNames}) VALUES (${placeholders})`;
+
+          try {
+            await connection.execute(query, values);
+            rowsLoaded++;
+          } catch (err: any) {
+            errors.push({
+              row: i,
+              error: err.message,
+            });
+          }
+        }
+      } else if (mode === 'upsert' && conflictKey && conflictKey.length > 0) {
+        // UPSERT (INSERT ... ON DUPLICATE KEY UPDATE)
+        const conflictColumns = conflictKey.map(col => `\`${col}\``).join(', ');
+
+        for (let i = 0; i < data.length; i++) {
+          const row = data[i];
+          const columnNames = columns.map(col => `\`${col}\``).join(', ');
+          const placeholders = columns.map((_, idx) => '?').join(', ');
+          const values = columns.map(col => row[col]);
+
+          // Build ON DUPLICATE KEY UPDATE clause
+          let updateClause = '';
+          if (conflictResolution === 'replace') {
+            // Replace all non-conflict columns
+            const nonConflictCols = columns.filter(col => !conflictKey.includes(col));
+            updateClause = nonConflictCols.map(col => `\`${col}\` = VALUES(\`${col}\`)`).join(', ');
+          } else if (conflictResolution === 'merge') {
+            // Skip on conflict (no update)
+            updateClause = '';
+          } else {
+            // Default: skip
+            updateClause = '';
+          }
+
+          const query = conflictResolution === 'merge' || conflictResolution === 'skip'
+            ? `INSERT INTO \`${tableName}\` (${columnNames}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE \`${conflictKey[0]}\` = \`${conflictKey[0]}\``
+            : `INSERT INTO \`${tableName}\` (${columnNames}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
+
+          try {
+            await connection.execute(query, values);
+            rowsLoaded++;
+          } catch (err: any) {
+            errors.push({
+              row: i,
+              error: err.message,
+            });
+          }
+        }
+      } else if (mode === 'create') {
+        // CREATE mode - truncate table first then insert
+        try {
+          await connection.execute(`TRUNCATE TABLE \`${tableName}\``);
+        } catch (err: any) {
+          // Table might not exist or can't be truncated, continue with insert
+        }
+
+        // Batch insert for better performance
+        const batchSize = 100;
+        for (let i = 0; i < data.length; i += batchSize) {
+          const batch = data.slice(i, i + batchSize);
+          const columnNames = columns.map(col => `\`${col}\``).join(', ');
+
+          const valueStrings: string[] = [];
+          const allValues: any[] = [];
+
+          for (let j = 0; j < batch.length; j++) {
+            const row = batch[j];
+            const placeholders = columns.map((_, idx) => '?').join(', ');
+            valueStrings.push(`(${placeholders})`);
+            columns.forEach(col => allValues.push(row[col]));
+          }
+
+          const query = `INSERT INTO \`${tableName}\` (${columnNames}) VALUES ${valueStrings.join(', ')}`;
+
+          try {
+            await connection.execute(query, allValues);
+            rowsLoaded += batch.length;
+          } catch (err: any) {
+            // If batch fails, try individual inserts
+            for (let k = 0; k < batch.length; k++) {
+              const row = batch[k];
+              const colNames = columns.map(col => `\`${col}\``).join(', ');
+              const placeholders = columns.map((_, idx) => '?').join(', ');
+              const values = columns.map(col => row[col]);
+
+              try {
+                await connection.execute(`INSERT INTO \`${tableName}\` (${colNames}) VALUES (${placeholders})`, values);
+                rowsLoaded++;
+              } catch (rowErr: any) {
+                errors.push({
+                  row: i + k,
+                  error: rowErr.message,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      await connection.end();
+
+      return {
+        rowsLoaded,
+        errors: errors.length > 0 ? errors : undefined,
+      };
+    } catch (error: any) {
+      await connection.end();
+      throw new Error(`MySQL load data failed: ${error.message}`);
     }
   }
 }
